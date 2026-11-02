@@ -1,0 +1,38 @@
+{
+ "_说明": "配乐分段表 v2：以留白为主，大多数片段只放一遍。start/end 单位秒，loop=true 才循环；gain 已整体压低。游戏能读到本文件时以本文件为准（version 必须为 2）。分段依据 .claude/audio_analysis/quiet_map.txt 的逐 3 秒响度/低频分析。",
+ "version": 2,
+ "sources": {
+  "piano": { "file": "src/oak_bay_piano.mp3", "title": "象岛 - 橡树湾（钢琴原曲）", "lufs": -13.1, "duration": 180 },
+  "bright": { "file": "src/oak_bay_comedy_bright.m4a", "title": "橡树湾 AI 改编（明亮律动）", "lufs": -14.4, "duration": 197 },
+  "wry": { "file": "src/oak_bay_comedy_wry.m4a", "title": "橡树湾 AI 改编（坏笑律动）", "lufs": -14.6, "duration": 208.3 },
+  "theme": { "file": "src/theme_tokens.m4a", "title": "主题曲《相恋直到 tokens 耗尽》", "lufs": -15.1, "duration": 208.4 },
+  "rain": { "file": "src/suite_rain.m4a", "title": "组曲《雨》", "lufs": -14.4, "duration": 242.5 },
+  "sun": { "file": "src/suite_sun.m4a", "title": "组曲《阳》", "lufs": -15.4, "duration": 218.7 },
+  "night": { "file": "src/light_night.m4a", "title": "Suno 轻音乐《夜色》", "lufs": null, "duration": 205 }
+ },
+ "cues": [
+  { "id": "title", "name": "标题画面", "src": "piano", "start": 0, "end": 168, "loop": true, "gain": 0.5, "use": "标题画面（循环）", "confidence": "高" },
+  { "id": "chapter", "name": "章节标题卡", "src": "piano", "start": 0, "end": 11, "loop": false, "gain": 0.45, "use": "章节标题卡，放一遍", "confidence": "高" },
+  { "id": "morning", "name": "09:00 · 晨光", "src": "sun", "start": 3, "end": 40, "loop": false, "gain": 0.45, "use": "每天 09:00 早间审判，放一遍后安静", "confidence": "中" },
+  { "id": "night", "name": "夜色 · 约会", "src": "night", "start": 0, "end": 57, "loop": false, "gain": 0.5, "use": "Day 7 / 8 / 12 晚上 20:00 约会，以及约会类 CG（新曲 G 大调，无鼓）", "confidence": "中" },
+  { "id": "night_b", "name": "夜色 · 第三周以后的约会", "src": "night", "start": 57, "end": 111, "loop": false, "gain": 0.5, "use": "Day 17 以后的约会（Day 19 天台、Day 24 防波堤），避免同一段听腻", "confidence": "中" },
+  { "id": "tender", "name": "夜色 · 屏幕两端", "src": "night", "start": 114, "end": 148, "loop": false, "gain": 0.5, "use": "X 私信 / 视频通话里和她说话（全曲最轻、低音最少的一段）", "confidence": "中" },
+  { "id": "latte", "name": "两颗糖", "src": "piano", "start": 12, "end": 66, "loop": false, "gain": 0.45, "use": "Day 14 两颗糖拿铁 CG", "confidence": "高" },
+  { "id": "comedy_bright", "name": "整活", "src": "bright", "start": 3, "end": 26, "loop": false, "gain": 0.4, "use": "Day 0 对线、Day 2 / Day 5 白天咖啡馆与黑客松——无鼓前奏", "confidence": "高" },
+  { "id": "comedy_wry", "name": "修罗场", "src": "wry", "start": 3, "end": 20, "loop": false, "gain": 0.42, "use": "修罗场名场面（Dario 翻伞、被收购结局）——只取无鼓的前奏", "confidence": "高" },
+  { "id": "comedy_bright_full", "name": "白天 · 整活", "src": "bright", "start": 27, "end": 80, "loop": false, "gain": 0.3, "use": "白天的整活名场面：Cooking 直播、Day 22 像素土豆（带鼓的主体段，只放一遍）", "confidence": "中" },
+  { "id": "comedy_wry_full", "name": "修罗场 · 高潮", "src": "wry", "start": 36, "end": 100, "loop": false, "gain": 0.3, "use": "修罗场高潮：Day 18 二周目 Dario 翻伞淋雨（带鼓的主体段，只放一遍）", "confidence": "中" },
+  { "id": "dario", "name": "Dario", "src": "rain", "start": 0, "end": 20, "loop": false, "gain": 0.42, "use": "Dario 登场 / 迈巴赫 / 黑金卡 / S-1 最后通牒", "confidence": "低" },
+  { "id": "sad", "name": "额度耗尽", "src": "rain", "start": 183, "end": 200, "loop": false, "gain": 0.5, "use": "额度耗尽、被抢走（《雨》里唯一没有重低音的一段）", "confidence": "低" },
+  { "id": "overheat", "name": "机房危机", "src": "rain", "start": 116, "end": 182, "loop": true, "gain": 0.3, "use": "14:00 机房控制台（唯一循环的危机曲，音量很低）", "confidence": "高" },
+  { "id": "world_line", "name": "另一条世界线", "src": "rain", "start": 183, "end": 200, "loop": false, "gain": 0.42, "use": "五段「另一条世界线」幕间", "confidence": "高" },
+  { "id": "sun_mid", "name": "午后 · poteto.com", "src": "sun", "start": 60, "end": 118, "loop": false, "gain": 0.4, "use": "Day 23 poteto.com", "confidence": "中" },
+  { "id": "comeback", "name": "绝地反击", "src": "sun", "start": 117, "end": 186, "loop": false, "gain": 0.48, "use": "高潮：Terra、Day 18 逆转、bel 发布", "confidence": "中" },
+  { "id": "true_end", "name": "真结局", "src": "sun", "start": 147, "end": 218, "loop": false, "gain": 0.5, "use": "真结局", "confidence": "高" },
+  { "id": "hidden_end", "name": "隐藏结局", "src": "piano", "start": 0, "end": 176, "loop": false, "gain": 0.5, "use": "隐藏结局（钢琴原曲完整一遍）", "confidence": "高" },
+  { "id": "theme_full", "name": "主题曲·完整版", "src": "theme", "start": 0, "end": 208.4, "loop": false, "gain": 0.55, "use": "打出任意结局后的结算画面（带人声）", "confidence": "高" }
+ ],
+ "sfx": {
+  "rewind": { "file": "sfx_rewind.m4a", "use": "时光重置卡发动（原曲开头倒放 + 混响，7.3 秒）", "gain": 0.6 }
+ }
+}

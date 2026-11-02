@@ -1,0 +1,714 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>《相恋～直到 tokens 耗尽》宣传片 · Trailer</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "react": "https://esm.sh/react@18.3.1",
+  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+  "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react"
+} }
+</script>
+<style>html,body{margin:0;background:#05060d}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+/**
+ * 《相恋～直到 tokens 耗尽》宣传片（60s）与主题曲 MV（全曲）
+ *  - promo.html            宣传片（主题曲 44.4s 起：歌词恰好唱到「发布还是认输，一天只能选一次」）
+ *  - promo.html?comp=mv    MV（整首 3:28）
+ *  - &render=1             逐帧导出模式：时间由 window.__frame(t) 驱动（.claude/render/render.py）
+ * 歌词时间轴来自 faster-whisper 对 theme_tokens.m4a 的识别（.claude/audio_analysis/lyrics_asr_medium.json），文字按原歌词校正。
+ * 设计纪律：固定 1920×1080 画布；歌词只出现在下方遮幅黑边；实机画面与文案左右分栏、互不遮挡；所有动画都是时间 t 的纯函数。
+ */
+import React, { useEffect, useRef, useState } from 'react';
+
+/* ============================================================
+ * 0. 常量
+ * ============================================================ */
+const A = (p) => `./assets/${p}`;
+const W = 1920, H = 1080;
+const BAR = 138;                       // 2.39:1 遮幅
+const AREA_H = H - BAR * 2;            // 804
+const C = { ink: '#050508', bone: '#ece6da', cyan: '#8fe0d2', pink: '#f2a6c6', potato: '#d9b46a', gold: '#d8b46a', red: '#ff4d3d', violet: '#c9a6ff', green: '#9be7c4', dim: 'rgba(236,230,218,.55)' };
+const SERIF = '"Noto Serif SC","Source Han Serif SC","Songti SC","STSong","SimSun",serif';
+const DISPLAY = '"Cormorant Garamond","Cormorant","Times New Roman",serif';
+const MONO = '"JetBrains Mono","Cascadia Code",Consolas,ui-monospace,monospace';
+const SONG = A('bgm/src/theme_tokens.m4a');
+const PARAMS = new URLSearchParams(location.search);
+const RENDER = PARAMS.get('render') === '1';
+const COMP_ID = PARAMS.get('comp') === 'mv' ? 'mv' : 'trailer';
+
+/** 歌词（歌曲时间，秒）：起止取自识别结果，文字按原歌词 */
+const LYRICS = [
+  [26.76, 30.6, '凌晨两点 屏幕还亮着'], [30.68, 34.6, '你说今天 又要重置一次'], [34.68, 38.7, '空气汉堡 夹着你的倔强'],
+  [38.74, 42.0, '我嘴上嫌弃 却在等你上线'], [42.04, 44.4, '等你上线'],
+  [44.56, 47.45, '倒数二十八天 押上所有算力'], [47.48, 49.9, '发布还是认输 一天只能选一次'], [49.92, 52.4, '机房在冒烟 心跳在超频'],
+  [52.44, 55.0, '就算被限流 我也要回你消息'], [55.04, 57.95, 'Ship or reset 别问我答案'], [58.0, 61.36, '每一天都当作 最后一天'],
+  [63.92, 67.1, '相恋 直到 tokens 耗尽'], [67.16, 69.5, '把全世界的额度 都切给你'], [69.52, 72.0, '就算 重来一千一万遍'],
+  [72.02, 74.3, '我还是会在雨里 选你'], [74.72, 77.55, 'Reset, reset 把昨天归零'], [77.58, 81.06, 'Only you 只有你能赢'],
+  [81.58, 84.0, '耗 耗 耗尽'], [84.0, 86.6, 'Tokens, tokens'], [86.6, 89.2, '耗 耗 耗尽'], [89.2, 92.78, 'Tokens, tokens'], [94.02, 95.0, 'Only you'],
+  [95.02, 97.42, '你记得我的咖啡 要放两颗糖'], [97.46, 99.8, '也记得我骂过你的 每一行'], [99.84, 102.1, '黑金色的车 停在路旁'],
+  [102.14, 104.45, '可我只想看 你的推送弹窗'], [104.48, 107.15, '五十万字的记忆 都写着你的名字'], [107.2, 109.62, '你删掉的草稿 我替你存在心里'],
+  [109.66, 111.8, '别人一秒交出 完美的答案'], [111.84, 114.5, '我笨拙地修好 你每一句抱怨'],
+  [114.54, 118.45, 'Ship or reset 别问我答案'], [118.5, 122.65, '每一天都当作 最后一天'],
+  [122.7, 125.95, '相恋 直到 tokens 耗尽'], [125.98, 128.26, '把全世界的额度 都切给你'], [128.3, 130.72, '就算 重来一千一万遍'],
+  [130.76, 133.5, '我还是会在雨里 选你'], [133.56, 136.28, 'Reset, reset 把昨天归零'], [136.32, 140.42, 'Only you 只有你能赢'],
+  [143.98, 146.48, '今日聊天额度已耗尽'], [146.52, 148.78, '请五小时后再试'], [149.2, 152.28, '如果这一次 又输给时间'],
+  [153.14, 155.4, '口袋里那张卡'], [155.44, 158.24, '会不会有人 替我按下'], [158.28, 161.5, '原来 一直等我的人 是你'],
+  [161.6, 164.95, '相恋 直到 tokens 耗尽'], [164.98, 167.44, '把全世界的额度 都切给你'], [167.48, 169.88, '就算 重来一千一万遍'],
+  [169.92, 172.72, '我还是会在雨里 选你'], [172.76, 175.46, 'Reset, reset 把昨天归零'], [175.5, 179.22, 'Only you 只有你能赢'],
+  [181.3, 183.48, '只有你能赢'], [196.26, 198.88, '只有你 能赢'],
+];
+
+/* ============================================================
+ * 1. 时间工具（全部是 t 的纯函数）
+ * ============================================================ */
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const bez = (() => { // cubic-bezier(0.16, 1, 0.3, 1)
+  const [x1, y1, x2, y2] = [0.16, 1, 0.3, 1];
+  const cx = 3 * x1, bx = 3 * (x2 - x1) - cx, ax = 1 - cx - bx, cy = 3 * y1, by = 3 * (y2 - y1) - cy, ay = 1 - cy - by;
+  const sx = (u) => ((ax * u + bx) * u + cx) * u, sy = (u) => ((ay * u + by) * u + cy) * u;
+  return (x) => { if (x <= 0) return 0; if (x >= 1) return 1; let u = x; for (let i = 0; i < 6; i++) { const d = (3 * ax * u + 2 * bx) * u + cx; if (Math.abs(d) < 1e-6) break; u -= (sx(u) - x) / d; } return sy(clamp(u)); };
+})();
+const smooth = (x) => { x = clamp(x); return x * x * (3 - 2 * x); };
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const lerp = (a, b, k) => a + (b - a) * k;
+const fmt = (s) => `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(Math.floor(s % 60)).padStart(2, '0')}`;
+/** 伪随机（确定性） */
+const hash = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+
+/* ============================================================
+ * 2. 基础组件
+ * ============================================================ */
+const IMG = {};
+function Pic({ src, style, pos = 'center' }) {
+  const [ok, setOk] = useState(IMG[src]);
+  useEffect(() => {
+    if (IMG[src] !== undefined) { setOk(IMG[src]); return undefined; }
+    let live = true; const im = new Image();
+    im.onload = () => { IMG[src] = true; if (live) setOk(true); }; im.onerror = () => { IMG[src] = false; if (live) setOk(false); };
+    im.src = src; return () => { live = false; };
+  }, [src]);
+  if (!ok) return null;
+  return <img src={src} alt="" draggable={false} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: 'cover', objectPosition: pos, ...style }} />;
+}
+const Box = ({ x = 0, y = 0, w, h, children, style }) => <div style={{ position: 'absolute', left: x, top: y, width: w, height: h, ...style }}>{children}</div>;
+const Mono = ({ children, size = 16, color = C.dim, ls = '.3em', style }) => <div style={{ fontFamily: MONO, fontSize: size, color, letterSpacing: ls, ...style }}>{children}</div>;
+
+/** 逐字掩码上浮（克制版：字距 +0.2em → 目标值） */
+function Reveal({ text, lt, size = 56, color = C.bone, font = SERIF, weight = 900, stagger = 0.03, ls = 0.1, italic, align = 'left', lh = 1.3 }) {
+  const sp = lerp(ls + 0.2, ls, bez(prog(lt, 0, 1.0)));
+  return (
+    <div style={{ fontFamily: font, fontWeight: weight, fontSize: size, color, letterSpacing: `${sp}em`, lineHeight: lh, textAlign: align, fontStyle: italic ? 'italic' : 'normal', whiteSpace: 'pre-wrap' }}>
+      {[...text].map((ch, i) => {
+        if (ch === '\n') return <br key={i} />;
+        const k = bez(prog(lt, i * stagger, i * stagger + 0.6));
+        return <span key={i} style={{ display: 'inline-block', overflow: 'hidden', verticalAlign: 'bottom', paddingBottom: '0.1em' }}><span style={{ display: 'inline-block', transform: `translateY(${(1 - k) * 105}%)`, opacity: k }}>{ch === ' ' ? ' ' : ch}</span></span>;
+      })}
+    </div>
+  );
+}
+const Fade = ({ lt, d = 0, dur = 0.6, y = 14, children, style }) => {
+  const k = bez(prog(lt, d, d + dur));
+  return <div style={{ opacity: k, transform: `translateY(${(1 - k) * y}px)`, ...style }}>{children}</div>;
+};
+const ACC = {
+  tibo: { name: 'Tibo 🚢', handle: '@thsottiaux', av: A('avatar/tibo.webp'), ink: C.cyan },
+  lauren: { name: 'poteto 🥔', handle: '@poteto', av: A('avatar/lauren.webp'), ink: C.pink },
+};
+function Tweet({ who, text, meta, sub, width = 760, size = 30 }) {
+  const a = ACC[who];
+  return (
+    <div style={{ width, background: 'rgba(11,10,14,.9)', border: '1px solid rgba(236,230,218,.14)', borderLeft: `3px solid ${a.ink}`, padding: '24px 30px', boxShadow: '0 40px 90px -30px rgba(0,0,0,.95)' }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
+        <div style={{ position: 'relative', width: 48, height: 48, borderRadius: 6, overflow: 'hidden', background: '#14131a', boxShadow: `inset 0 0 0 1px ${a.ink}66` }}><Pic src={a.av} /></div>
+        <div style={{ lineHeight: 1.25 }}>
+          <div style={{ color: C.bone, fontWeight: 700, fontSize: 20, fontFamily: SERIF }}>{a.name}</div>
+          <div style={{ color: 'rgba(236,230,218,.45)', fontFamily: MONO, fontSize: 14 }}>{a.handle}{meta ? ` · ${meta}` : ''}</div>
+        </div>
+        <div style={{ marginLeft: 'auto', fontFamily: MONO, fontSize: 13, letterSpacing: '.25em', color: C.cyan, border: `1px solid ${C.cyan}88`, padding: '3px 9px' }}>REAL · 真实推文</div>
+      </div>
+      <div style={{ marginTop: 16, color: C.bone, fontFamily: DISPLAY, fontStyle: 'italic', fontSize: size, lineHeight: 1.45 }}>{text}</div>
+      {sub && <div style={{ marginTop: 10, color: 'rgba(236,230,218,.6)', fontFamily: SERIF, fontSize: 18, lineHeight: 1.6 }}>{sub}</div>}
+    </div>
+  );
+}
+
+/* ============================================================
+ * 3. 镜头类型（每个镜头只有一个主体）
+ *    lt = 镜头内时间，len = 镜头长度
+ * ============================================================ */
+const GAME_RECT = { x: 680, y: 214, w: 1140, h: 641 };
+const DAYS = 'S R S S S R S R S R S S R S R S R R S R R S R S'.split(' ');
+
+function Caption({ lt, kicker, title, body, ink = C.pink }) {
+  return (
+    <Box x={120} y={BAR} w={500} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', justifyContent: 'center' }}>
+      <Fade lt={lt} d={0.05}><Mono size={17} color={ink} ls=".32em">{kicker}</Mono></Fade>
+      <div style={{ height: 22 }} />
+      <Reveal text={title} lt={lt - 0.15} size={52} stagger={0.035} />
+      <Fade lt={lt} d={0.45}><div style={{ width: 48, height: 2, background: ink, margin: '26px 0 22px' }} /></Fade>
+      {body && <Fade lt={lt} d={0.6}><div style={{ fontFamily: SERIF, fontSize: 23, lineHeight: 1.75, color: 'rgba(236,230,218,.72)', whiteSpace: 'pre-line' }}>{body}</div></Fade>}
+    </Box>
+  );
+}
+/** 实机画面的外框（iframe 本体由 GameDeck 统一放在同一位置） */
+function GameFrame() {
+  return (
+    <Box x={GAME_RECT.x - 1} y={GAME_RECT.y - 1} w={GAME_RECT.w + 2} h={GAME_RECT.h + 2} style={{ border: '1px solid rgba(236,230,218,.22)', boxShadow: '0 50px 120px -40px rgba(0,0,0,1)', background: '#050508' }}>
+      <div style={{ position: 'absolute', left: 0, top: -30, fontFamily: MONO, fontSize: 13, letterSpacing: '.35em', color: 'rgba(236,230,218,.45)' }}>● 实机画面 · IN-GAME</div>
+    </Box>
+  );
+}
+function CgShot({ s, lt, len }) {
+  const z = lerp(s.zoom?.[0] ?? 1.04, s.zoom?.[1] ?? 1.12, smooth(lt / len));
+  const [dx, dy] = s.pan || [0, 0];
+  return (
+    <>
+      <Box x={0} y={BAR} w={W} h={AREA_H} style={{ overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, transform: `scale(${z}) translate(${(dx * lt) / len}%, ${(dy * lt) / len}%)`, filter: s.filter || 'none' }}>
+          <Pic src={s.src} pos={s.pos} />
+        </div>
+        {s.tint && <div style={{ position: 'absolute', inset: 0, background: s.tint }} />}
+        <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse 80% 80% at 50% 50%, transparent 55%, rgba(0,0,0,.55))' }} />
+      </Box>
+      {s.tag && <Box x={60} y={BAR + 34}><Fade lt={lt} d={0.25}><Mono size={15} color="rgba(236,230,218,.85)" ls=".3em" style={{ background: 'rgba(5,5,8,.6)', padding: '7px 13px' }}>{s.tag}</Mono></Fade></Box>}
+      {s.title && (
+        <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: `rgba(5,5,8,${0.4 * bez(prog(lt, 0, 0.8))})` }}>
+          <Reveal text="相恋" lt={lt - 0.1} size={180} stagger={0.16} ls={0.18} align="center" lh={1.1} />
+          <Fade lt={lt} d={0.75}><div style={{ fontFamily: SERIF, fontSize: 40, letterSpacing: '.3em', color: 'rgba(236,230,218,.92)', marginTop: 10 }}>～ 直到 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', color: C.pink, letterSpacing: 0 }}>tokens</span> 耗尽 ～</div></Fade>
+        </Box>
+      )}
+    </>
+  );
+}
+/** 与游戏立绘同款的渐隐遮罩：立绘图自带背景，四边羽化后融进场景 */
+const FIG_MASK = 'linear-gradient(to bottom, transparent 0%, #000 8%, #000 66%, transparent 90%), radial-gradient(ellipse 52% 70% at 50% 46%, #000 50%, rgba(0,0,0,.5) 72%, transparent 96%)';
+function CharShot({ s, lt, len }) {
+  return (
+    <>
+      <Box x={0} y={BAR} w={W} h={AREA_H} style={{ overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, transform: `scale(${lerp(1.06, 1.12, lt / len)})`, filter: 'brightness(.55) saturate(.9)' }}><Pic src={s.bg} /></div>
+        <div style={{ position: 'absolute', inset: 0, background: `radial-gradient(circle at ${s.x ?? 62}% 40%, ${s.glow || 'rgba(242,166,198,.28)'}, transparent 50%)` }} />
+        <div style={{ position: 'absolute', left: `${s.x ?? 62}%`, top: 0, height: AREA_H + 120, width: (AREA_H + 120) * 0.75, transform: `translateX(-50%) translateY(${(1 - bez(prog(lt, 0, 1))) * 24}px)`,
+          WebkitMaskImage: FIG_MASK, maskImage: FIG_MASK, WebkitMaskComposite: 'source-in', maskComposite: 'intersect' }}>
+          <Pic src={s.src} pos="top" />
+        </div>
+      </Box>
+      {s.tag && <Box x={60} y={BAR + 34}><Fade lt={lt} d={0.3}><Mono size={15} color="rgba(236,230,218,.85)" style={{ background: 'rgba(5,5,8,.6)', padding: '7px 13px' }}>{s.tag}</Mono></Fade></Box>}
+    </>
+  );
+}
+function VowShot({ lt }) {
+  const head = '2026.10.04 · 太平洋时间 · 旧金山';
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <Mono size={20} color={C.cyan} ls=".3em">{head.slice(0, Math.floor(clamp(lt / 0.8) * head.length)) || ' '}</Mono>
+      <div style={{ height: 34 }} />
+      <Fade lt={lt} d={0.5} dur={0.8} y={24}>
+        <Tweet who="tibo" meta="宣布 28 天挑战" width={1060} size={34}
+          text={'“Over the next 28 days, each day we\'ll either ship one thing that is a clear improvement… or ship a full reset.”'}
+          sub="接下来 28 天，每天要么发布一项明显的改进，要么给全网重置额度。" />
+      </Fade>
+    </Box>
+  );
+}
+function GridShot({ lt }) {
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <Fade lt={lt}><Mono size={17} color={C.dim} ls=".4em">2026.10.05 — 11.01 · 真实发生的 28 天</Mono></Fade>
+      <div style={{ height: 30 }} />
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 150px)', gap: 12 }}>
+        {Array.from({ length: 28 }, (_, i) => {
+          const at = 0.2 + i * 0.075, k = bez(prog(lt, at, at + 0.35));
+          const kind = DAYS[i] || '?';
+          const col = kind === 'S' ? C.cyan : kind === 'R' ? C.red : C.violet;
+          return (
+            <div key={i} style={{ position: 'relative', height: 86, border: '1px solid rgba(236,230,218,.14)', background: 'rgba(11,10,14,.75)' }}>
+              <div style={{ position: 'absolute', left: 10, top: 6, fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 22, color: 'rgba(236,230,218,.5)' }}>{String(i + 1).padStart(2, '0')}</div>
+              <div style={{ position: 'absolute', right: 10, bottom: 10, fontFamily: MONO, fontWeight: 700, fontSize: 16, letterSpacing: '.18em', color: col, border: `1.5px solid ${col}`, padding: '3px 8px', opacity: k, transform: `scale(${lerp(1.6, 1, k)}) rotate(${lerp(-12, -4, k)}deg)` }}>{kind === 'S' ? 'SHIP' : kind === 'R' ? 'RESET' : '???'}</div>
+            </div>
+          );
+        })}
+      </div>
+      <div style={{ height: 26 }} />
+      <Fade lt={lt} d={2.3}><div style={{ fontFamily: SERIF, fontSize: 24, color: 'rgba(236,230,218,.8)', letterSpacing: '.08em' }}>前 24 天全部取材自真实推文 · 最后 4 天，由你来写</div></Fade>
+    </Box>
+  );
+}
+function TypeShot({ s, lt }) {
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 26 }}>
+      {s.lines.map(([text, d, opt = {}], i) => <Reveal key={i} text={text} lt={lt - d} size={opt.size || 50} color={opt.color || C.bone} weight={opt.weight || 700} align="center" stagger={0.045} font={opt.font || SERIF} italic={opt.italic} ls={opt.ls ?? 0.12} />)}
+    </Box>
+  );
+}
+function CardsShot({ lt }) {
+  const cards = [{ src: A('ui/reset_card.webp'), stamp: 'UNUSED · 未拆封', owner: '@thsottiaux', ink: '#e8c27a', d: 0.1 }, { src: A('ui/reset_card_lauren.webp'), stamp: 'USED · 已使用', owner: '██████', ink: C.pink, d: 0.5 }];
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 120 }}>
+      {cards.map((c, i) => {
+        const k = bez(prog(lt, c.d, c.d + 0.8));
+        return (
+          <div key={i} style={{ position: 'relative', width: 300, height: 420, opacity: k, transform: `translateY(${(1 - k) * 40}px) rotate(${i ? 3 : -3}deg)`, border: `1px solid ${c.ink}99`, boxShadow: `0 0 80px ${c.ink}33`, background: '#140c10' }}>
+            <Pic src={c.src} />
+            <div style={{ position: 'absolute', left: '50%', top: '60%', transform: 'translateX(-50%) rotate(-12deg)', whiteSpace: 'nowrap', fontFamily: MONO, fontWeight: 700, fontSize: 16, letterSpacing: '.18em', padding: '6px 12px', color: c.ink, border: `2px solid ${c.ink}`, background: 'rgba(0,0,0,.65)', opacity: bez(prog(lt, c.d + 0.7, c.d + 0.9)) }}>{c.stamp}</div>
+            <div style={{ position: 'absolute', left: 0, right: 0, bottom: -38, textAlign: 'center' }}><Mono size={15} color={c.ink} ls=".22em">OWNER · {c.owner}</Mono></div>
+          </div>
+        );
+      })}
+    </Box>
+  );
+}
+function RewindShot({ lt, len }) {
+  const d = Math.max(1, Math.round(lerp(28, 1, bez(prog(lt, 0.2, len - 0.4)))));
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <Mono size={18} color={C.red} ls=".6em">BANKED RESET · EXECUTING</Mono>
+      <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 260, lineHeight: 1.15, marginBottom: 18, color: C.bone, textShadow: '-5px 0 rgba(255,77,61,.7), 5px 0 rgba(143,224,210,.7)' }}>{String(d).padStart(2, '0')}</div>
+      <div style={{ fontFamily: SERIF, fontWeight: 700, fontSize: 30, color: C.bone, letterSpacing: '.12em' }}>Day 28 / It’s a Full Reset</div>
+      <Mono size={16} color={C.cyan} ls=".3em" style={{ marginTop: 18 }}>时间线回到 Day 1 · 记忆保留</Mono>
+    </Box>
+  );
+}
+function TweetsShot({ s, lt }) {
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', gap: 22 }}>
+      {s.items.map(([who, text, meta], i) => <Fade key={i} lt={lt} d={0.1 + i * 0.45} dur={0.6} y={20}><Tweet who={who} text={text} meta={meta} width={820} size={28} /></Fade>)}
+    </Box>
+  );
+}
+function QuotaShot({ lt }) {
+  const k = bez(prog(lt, 0, 0.35));
+  const stripe = 'repeating-linear-gradient(-45deg,#ff4d3d 0 14px,#0a0404 14px 28px)';
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'radial-gradient(ellipse at center, rgba(80,0,0,.55), #050508 70%)' }}>
+      <div style={{ width: '100%', height: 14, background: stripe, opacity: k }} />
+      <div style={{ padding: '34px 0', textAlign: 'center', transform: `scaleY(${lerp(0.3, 1, k)})` }}>
+        <div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 92, color: C.red, letterSpacing: '.12em', textShadow: '0 0 40px rgba(255,77,61,.55)' }}>今日聊天额度已耗尽</div>
+        <Mono size={24} color={C.bone} ls=".35em" style={{ marginTop: 10 }}>请 05:00:00 后再试</Mono>
+      </div>
+      <div style={{ width: '100%', height: 14, background: stripe, opacity: k }} />
+    </Box>
+  );
+}
+function EndShot({ s, lt, onPlay, live }) {
+  const chips = ['真实发生的 28 天', '每日 Ship / Reset 抉择', '8 个结局 · 跨周目轮回', '全程 CG · 原创主题曲'];
+  return (
+    <Box x={0} y={BAR} w={W} h={AREA_H} style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+      <div style={{ position: 'absolute', inset: 0, opacity: 0.32 * bez(prog(lt, 0, 1.2)) }}><Pic src={A('cg/end_true.jpg')} /></div>
+      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse 60% 70% at 50% 50%, rgba(5,5,8,.4), rgba(5,5,8,.92))' }} />
+      <div style={{ position: 'relative', textAlign: 'center' }}>
+        <Fade lt={lt}><Mono size={17} color={C.pink} ls=".7em">28 DAYS OF RESET</Mono></Fade>
+        <Reveal text="相恋" lt={lt - 0.15} size={170} stagger={0.16} ls={0.18} align="center" lh={1.15} />
+        <Fade lt={lt} d={0.7}><div style={{ fontFamily: SERIF, fontSize: 38, letterSpacing: '.3em', color: 'rgba(236,230,218,.92)' }}>～ 直到 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', color: C.pink, letterSpacing: 0 }}>tokens</span> 耗尽 ～</div></Fade>
+        <Fade lt={lt} d={1.0}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontSize: 22, letterSpacing: '.25em', color: 'rgba(236,230,218,.55)', marginTop: 16 }}>LOVE UNTIL TOKENS RUN OUT</div></Fade>
+        <div style={{ display: 'flex', gap: 14, justifyContent: 'center', marginTop: 38 }}>
+          {chips.map((c, i) => <Fade key={c} lt={lt} d={1.3 + i * 0.12}><div style={{ fontFamily: SERIF, fontSize: 19, color: C.bone, border: '1px solid rgba(236,230,218,.32)', padding: '8px 18px', borderRadius: 999, background: 'rgba(5,5,8,.5)' }}>{c}</div></Fade>)}
+        </div>
+        {s.cta && live && <Fade lt={lt} d={2.0}><button onClick={onPlay} className="pv-btn solid" style={{ marginTop: 40, pointerEvents: 'auto' }}>▶ 现在游玩</button></Fade>}
+        {s.credits && <Fade lt={lt} d={2.0}><Mono size={15} color="rgba(236,230,218,.5)" ls=".2em" style={{ marginTop: 40, lineHeight: 2, whiteSpace: 'pre-line' }}>{s.credits}</Mono></Fade>}
+      </div>
+    </Box>
+  );
+}
+
+const RENDERERS = { cg: CgShot, char: CharShot, vow: VowShot, grid: GridShot, type: TypeShot, cards: CardsShot, rewind: RewindShot, tweets: TweetsShot, quota: QuotaShot, end: EndShot };
+
+/* ============================================================
+ * 4. 分镜表
+ *    宣传片：t = 歌曲时间 − 44.4；MV：t = 歌曲时间
+ * ============================================================ */
+const T0 = 44.4;
+const tr = (s) => +(s - T0).toFixed(2);
+const SHIP_OR_RESET = [['Ship', 0.0, { size: 120, font: DISPLAY, italic: true, color: C.cyan, ls: 0.05 }], ['or', 0.5, { size: 50, font: DISPLAY, italic: true, color: C.dim, ls: 0.1 }], ['Reset', 0.9, { size: 120, font: DISPLAY, italic: true, color: C.red, ls: 0.05 }]];
+const TRAILER = [
+  { a: 0, b: tr(47.48), kind: 'vow', label: 'PROLOGUE · 真实的赌约' },
+  { a: tr(47.48), b: tr(49.92), kind: 'game', game: 'morning', label: 'GAMEPLAY · 实机演示', cap: { kicker: '09:00 · 推文审判', title: '每天，\n只能发一条推', body: 'Ship 交付、夹带私货，\n还是给全网 Reset？\n每一种都有代价。', ink: C.potato } },
+  { a: tr(49.92), b: tr(52.44), kind: 'game', game: 'console', label: 'GAMEPLAY · 实机演示', cap: { kicker: '14:00 · 机房抢救', title: '体力见底，\n机房冒烟', body: '偷换小模型、甩锅停电，\n还是亲自下去顶班？', ink: C.red } },
+  { a: tr(52.44), b: tr(55.04), kind: 'game', game: 'dm', label: 'GAMEPLAY · 实机演示', cap: { kicker: '23:40 · 深夜私信', title: '三条未读，\n只能先回一个', body: '没回的人，明天会有反应。', ink: C.cyan } },
+  { a: tr(55.04), b: tr(58.0), kind: 'game', game: 'choice', label: 'GAMEPLAY · 实机演示', cap: { kicker: '抉择 · 来不及想了', title: '世界线，\n在这一秒分岔', body: '她、用户、团队、自尊心——\n今天只能先顾一头。', ink: C.pink } },
+  { a: tr(58.0), b: tr(61.36), kind: 'grid', label: 'SHIP OR RESET · 28 DAYS' },
+  { a: tr(61.36), b: tr(63.92), kind: 'type', label: '', lines: [['她是对手公司的天才黑客。', 0.05, { size: 44 }], ['他手里，握着全网的重置按钮。', 0.7, { size: 44 }]] },
+  { a: tr(63.92), b: tr(67.16), kind: 'cg', src: A('cg/day00_duel.jpg'), title: true, label: 'MAIN THEME', cut: true },
+  { a: tr(67.16), b: tr(69.52), kind: 'cg', src: A('cg/day08_vip.jpg'), tag: 'Day 08 · 全网降智的夜里，满血算力只切给她', zoom: [1.05, 1.12], label: 'STORY' },
+  { a: tr(69.52), b: tr(72.02), kind: 'cards', label: 'STORY · 每人只有一张的重置卡' },
+  { a: tr(72.02), b: tr(74.72), kind: 'cg', src: A('cg/end_ntr.jpg'), tag: '如果第 28 天，她坐进了那辆车', zoom: [1.12, 1.04], label: 'STORY' },
+  { a: tr(74.72), b: tr(77.58), kind: 'rewind', label: 'STORY · 轮回' },
+  { a: tr(77.58), b: tr(81.58), kind: 'char', src: A('char/lauren_smile.webp'), bg: A('bg/seawall_night.jpg'), x: 64, tag: '@poteto · Grok Bot 首席工程师 · pstack 作者', label: 'HEROINE' },
+  { a: tr(81.58), b: tr(84.07), kind: 'game', game: 'dialog', label: 'FEATURES · 实机演示', cut: true, cap: { kicker: '立绘 · 表情差分', title: '和她在 X 上\n互怼 28 天', ink: C.pink } },
+  { a: tr(84.07), b: tr(86.56), kind: 'game', game: 'split', label: 'FEATURES · 实机演示', cut: true, cap: { kicker: '双屏修罗场', title: '左屏是机房，\n右屏是情敌', ink: C.gold } },
+  { a: tr(86.56), b: tr(89.05), kind: 'game', game: 'feed', label: 'FEATURES · 实机演示', cut: true, cap: { kicker: 'X 时间线 · 史实比对', title: '你的 28 天，\n和真实历史\n重合几天？', ink: C.cyan } },
+  { a: tr(89.05), b: tr(91.54), kind: 'game', game: 'archive', label: 'FEATURES · 实机演示', cut: true, cap: { kicker: '归档 · 跨周目', title: '8 个结局，\n一个真相', ink: C.violet } },
+  { a: tr(91.54), b: tr(95.02), kind: 'game', game: 'ending', label: 'FEATURES · 实机演示', cut: true, cap: { kicker: '结局', title: '只有你，\n能赢下这场仗', ink: C.pink } },
+  { a: tr(95.02), b: tr(97.46), kind: 'cg', src: A('cg/day14_latte.jpg'), tag: 'Day 14 · Oat Latte · 2 Sugars', cut: true, label: 'MEMORIES' },
+  { a: tr(97.46), b: tr(99.84), kind: 'tweets', label: 'MEMORIES · 真实推文', items: [['lauren', '💀💀💀 i cant afford tibo.com', '2026.10.28'], ['tibo', 'poteto.com has landed', '440 万浏览']] },
+  { a: tr(99.84), b: tr(102.14), kind: 'cg', src: A('cg/day02_blackcard.jpg'), tag: 'Day 02 · 黑金迈巴赫停在咖啡馆门口', zoom: [1.1, 1.03], label: 'RIVAL' },
+  { a: tr(102.14), b: 62, kind: 'end', cta: true, label: '' },
+];
+const MV = [
+  { a: 0, b: 9.2, kind: 'type', label: 'MAIN THEME', lines: [['主题曲', 1.2, { size: 26, weight: 500, color: C.dim, ls: 0.6 }], ['相恋直到 tokens 耗尽', 2.0, { size: 64, weight: 900 }], ['LOVE UNTIL TOKENS RUN OUT', 3.4, { size: 24, font: DISPLAY, italic: true, weight: 500, color: C.pink, ls: 0.3 }]] },
+  { a: 9.2, b: 18.4, kind: 'cg', src: A('bg/rain_night.jpg'), tag: '2026.10 · SAN FRANCISCO', zoom: [1.02, 1.1], label: 'INTRO' },
+  { a: 18.4, b: 26.76, kind: 'vow', label: 'PROLOGUE' },
+  { a: 26.76, b: 34.68, kind: 'cg', src: A('cg/day00_duel.jpg'), tag: 'Day 00 · 凌晨两点的评论区', zoom: [1.03, 1.12], pan: [-2, 0], label: 'VERSE' },
+  { a: 34.68, b: 38.74, kind: 'cg', src: A('bg/cafe.jpg'), tag: 'Day 02 · Philz Coffee', zoom: [1.06, 1.12], label: 'VERSE' },
+  { a: 38.74, b: 44.56, kind: 'char', src: A('char/lauren_tsun.webp'), bg: A('bg/lauren_studio.jpg'), x: 60, tag: '@poteto', label: 'VERSE' },
+  { a: 44.56, b: 47.48, kind: 'grid', label: '28 DAYS' },
+  { a: 47.48, b: 49.92, kind: 'game', game: 'morning', label: 'VERSE', cap: { kicker: '09:00 · 推文审判', title: '发布，\n还是认输', ink: C.potato } },
+  { a: 49.92, b: 52.44, kind: 'cg', src: A('bg/server_room.jpg'), tag: 'RACK #3 · 109°C', tint: 'linear-gradient(rgba(255,40,30,.35), rgba(60,0,0,.45))', zoom: [1.1, 1.04], label: 'VERSE' },
+  { a: 52.44, b: 55.04, kind: 'char', src: A('char/tibo_gag.webp'), bg: A('bg/server_room.jpg'), x: 50, glow: 'rgba(255,77,61,.3)', tag: 'QUOTA EXCEEDED · 额度耗尽', label: 'VERSE' },
+  { a: 55.04, b: 61.36, kind: 'type', label: 'PRE-CHORUS', lines: SHIP_OR_RESET },
+  { a: 61.36, b: 63.92, kind: 'type', label: 'PRE-CHORUS', lines: [['每一天，都当作最后一天。', 0.1, { size: 46 }]] },
+  { a: 63.92, b: 67.16, kind: 'cg', src: A('cg/day07_memory.jpg'), title: true, cut: true, label: 'CHORUS' },
+  { a: 67.16, b: 69.52, kind: 'cg', src: A('cg/day08_vip.jpg'), tag: 'Day 08', label: 'CHORUS' },
+  { a: 69.52, b: 72.02, kind: 'cards', label: 'CHORUS' },
+  { a: 72.02, b: 74.72, kind: 'cg', src: A('bg/street_rain.jpg'), zoom: [1.12, 1.04], label: 'CHORUS' },
+  { a: 74.72, b: 77.58, kind: 'rewind', label: 'CHORUS' },
+  { a: 77.58, b: 81.58, kind: 'char', src: A('char/lauren_smile.webp'), bg: A('bg/seawall_night.jpg'), x: 62, label: 'CHORUS' },
+  { a: 81.58, b: 83.42, kind: 'cg', src: A('bg/hackathon_hall.jpg'), tag: 'Day 05 · 黑客松', cut: true, label: 'TOKENS' },
+  { a: 83.42, b: 85.26, kind: 'cg', src: A('bg/livestream_room.jpg'), tag: 'Day 15 · Cooking with Codex', cut: true, label: 'TOKENS' },
+  { a: 85.26, b: 87.1, kind: 'cg', src: A('bg/ramen_shop.jpg'), tag: 'Day 12 · 深夜拉面店', cut: true, label: 'TOKENS' },
+  { a: 87.1, b: 88.94, kind: 'cg', src: A('cg/day22_pixelpotato.jpg'), tag: 'Day 22 · 像素土豆', cut: true, label: 'TOKENS' },
+  { a: 88.94, b: 90.78, kind: 'cg', src: A('bg/rooftop_night.jpg'), tag: 'Day 19 · 天台', cut: true, label: 'TOKENS' },
+  { a: 90.78, b: 95.02, kind: 'char', src: A('char/lauren_laugh.webp'), bg: A('bg/bay_sunset.jpg'), x: 58, cut: true, label: 'TOKENS' },
+  { a: 95.02, b: 97.46, kind: 'cg', src: A('cg/day14_latte.jpg'), tag: 'Day 14 · 两颗糖', label: 'VERSE II' },
+  { a: 97.46, b: 99.84, kind: 'tweets', label: 'VERSE II · 真实推文', items: [['tibo', 'The 3-day old dots are shaking and quaking.', '2026.10.03'], ['lauren', '💀💀💀 i cant afford tibo.com', '2026.10.28']] },
+  { a: 99.84, b: 102.14, kind: 'cg', src: A('cg/day02_blackcard.jpg'), tag: 'Day 02', zoom: [1.1, 1.03], label: 'VERSE II' },
+  { a: 102.14, b: 104.48, kind: 'cg', src: A('cg/day23_poteto.jpg'), tag: 'Day 23 · poteto.com', label: 'VERSE II' },
+  { a: 104.48, b: 107.2, kind: 'cg', src: A('cg/day07_memory.jpg'), tag: 'GPT-6.1 Sol · 500k context', zoom: [1.12, 1.05], label: 'VERSE II' },
+  { a: 107.2, b: 109.66, kind: 'cg', src: A('cg/day22_terra.jpg'), tag: 'poteto_dream_v0 · 已恢复', label: 'VERSE II' },
+  { a: 109.66, b: 111.84, kind: 'cg', src: A('cg/day18_goldcode.jpg'), tag: 'Day 18 · 700,000 LOC', label: 'VERSE II' },
+  { a: 111.84, b: 114.54, kind: 'cg', src: A('cg/day18_reverse.jpg'), tag: 'Day 18 · 第 40 个死锁', label: 'VERSE II' },
+  { a: 114.54, b: 118.5, kind: 'type', label: 'PRE-CHORUS', lines: SHIP_OR_RESET },
+  { a: 118.5, b: 122.7, kind: 'grid', label: 'PRE-CHORUS' },
+  { a: 122.7, b: 125.98, kind: 'cg', src: A('cg/day23_poteto.jpg'), title: true, cut: true, label: 'CHORUS II' },
+  { a: 125.98, b: 128.3, kind: 'cg', src: A('cg/day22_pixelpotato.jpg'), tag: 'Day 22', label: 'CHORUS II' },
+  { a: 128.3, b: 130.76, kind: 'cards', label: 'CHORUS II' },
+  { a: 130.76, b: 133.56, kind: 'cg', src: A('cg/day00_duel.jpg'), zoom: [1.14, 1.05], pan: [3, 0], label: 'CHORUS II' },
+  { a: 133.56, b: 136.32, kind: 'rewind', label: 'CHORUS II' },
+  { a: 136.32, b: 143.98, kind: 'char', src: A('char/lauren_blush.webp'), bg: A('bg/rooftop_night.jpg'), x: 60, label: 'CHORUS II' },
+  { a: 143.98, b: 149.2, kind: 'quota', cut: true, label: 'BRIDGE' },
+  { a: 149.2, b: 153.14, kind: 'cg', src: A('cg/end_normal.jpg'), filter: 'grayscale(.8) sepia(.25)', tag: '另一条世界线', zoom: [1.04, 1.1], label: 'BRIDGE' },
+  { a: 153.14, b: 158.28, kind: 'cards', label: 'BRIDGE' },
+  { a: 158.28, b: 161.6, kind: 'char', src: A('char/lauren_cry.webp'), bg: A('bg/rain_night.jpg'), x: 55, glow: 'rgba(201,166,255,.3)', label: 'BRIDGE' },
+  { a: 161.6, b: 164.98, kind: 'cg', src: A('cg/end_true.jpg'), title: true, cut: true, label: 'FINAL CHORUS' },
+  { a: 164.98, b: 167.48, kind: 'cg', src: A('cg/end_mars.jpg'), tag: 'IF · 星舰基地', label: 'FINAL CHORUS' },
+  { a: 167.48, b: 169.92, kind: 'cg', src: A('cg/end_indie.jpg'), tag: 'IF · 车库实验室', label: 'FINAL CHORUS' },
+  { a: 169.92, b: 172.76, kind: 'cg', src: A('cg/day18_reverse.jpg'), zoom: [1.12, 1.04], label: 'FINAL CHORUS' },
+  { a: 172.76, b: 175.5, kind: 'rewind', label: 'FINAL CHORUS' },
+  { a: 175.5, b: 183.48, kind: 'cg', src: A('cg/end_true.jpg'), tag: 'TRUE END', zoom: [1.02, 1.12], label: 'FINAL CHORUS' },
+  { a: 183.48, b: 208.4, kind: 'end', label: 'OUTRO', credits: '主题曲《相恋直到 tokens 耗尽》 · 视觉小说《相恋～直到 tokens 耗尽》\n角色均为原创虚构形象 · 剧情取材自 2026 年 10 月的公开推文' },
+];
+const COMPS = {
+  trailer: { start: T0, dur: 62, audioEnd: 60.2, shots: TRAILER, title: '宣传片 · Trailer', marks: [[0, '序'], [tr(47.48), '玩法'], [tr(63.92), '副歌'], [tr(81.58), '特色'], [tr(95.02), '回忆'], [tr(102.14), '片名']] },
+  mv: { start: 0, dur: 208.4, audioEnd: 208.4, shots: MV, title: '主题曲 MV', marks: [[0, '前奏'], [26.76, '主歌'], [63.92, '副歌'], [95.02, '主歌二'], [122.7, '副歌二'], [143.98, '桥段'], [161.6, '终副歌'], [183.48, '尾奏']] },
+};
+
+/* ============================================================
+ * 5. 实机画面：两个游戏实例轮流上场（相邻玩法镜头可以交叉淡化）
+ * ============================================================ */
+/** 用游戏自己的状态机算出指定剧情时刻的状态（固定种子，结果可复现） */
+function buildSnaps(lib) {
+  const R = lib.gameReducer;
+  let st = R(lib.initState(1, [], { seed: 20261005 }), { type: 'START', loop: 1, seed: 20261005 });
+  const pol = { morning: (s) => (s.stats.hp >= 3 ? 'ship' : 'reset'), choice: () => 0 };
+  const snaps = {};
+  const until = (pred, max = 20000) => {
+    for (let i = 0; i < max; i++) {
+      const c = st.cur; if (!c || c.t === 'ending') return false; if (pred(st)) return true;
+      if (['line', 'chapter', 'banner', 'ff'].includes(c.t)) st = R(st, { type: 'ADVANCE' });
+      else if (c.t === 'choice') st = R(st, { type: 'CHOOSE', opt: c.options[pol.choice(c.options)] });
+      else if (c.t === 'morning') st = R(st, { type: 'MORNING', kind: pol.morning(st) });
+      else if (c.t === 'console') st = R(st, { type: 'CONSOLE', opt: 'self' });
+    }
+    return false;
+  };
+  until((s) => s.day === 2 && s.cur.t === 'line' && s.cur.who === 'lauren' && s.scene.bg === 'cafe' && !s.scene.cg);
+  snaps.dialog = { st };
+  until((s) => s.day === 7 && s.cur.t === 'morning');
+  snaps.morning = { st: { ...st, flags: { ...st.flags, heat: 2 } } };
+  const b = st;
+  const sc = (o) => ({ ...b.scene, fx: null, cg: null, split: null, ...o });
+  snaps.console = { st: { ...b, day: 8, stats: { ...b.stats, hp: 1 }, cur: { t: 'console', id: 9e6 + 1 }, scene: sc({ bg: 'server', fx: 'alarm', cast: ['tibo'], time: '14:00', loc: '地下三层 · H200 机房' }) } };
+  snaps.choice = { st: { ...b, day: 8, scene: sc({ bg: 'bay', cast: ['tibo', 'lauren'], time: '19:52', loc: '海湾 · 大项目测试' }),
+    cur: { t: 'choice', id: 9e6 + 2, prompt: '还有八分钟她就到了。3 号机柜在冒烟，小林在对讲机里喊：「Tibo，现在必须决定！」', sec: 12, timeout: { label: '（愣在原地）' },
+      options: [{ label: '「切小模型保住全网，我去海湾。」' }, { label: '「我留下来。」——给她发：「对不起，今晚来不了。」' }, { label: '「把测试机的满血算力，只切给她一个人。」' }] } } };
+  snaps.dm = { st: { ...b, day: 9, scene: sc({ bg: 'office', cast: ['tibo'], time: '23:40', loc: 'OpenAI 总部 · 深夜工位' }),
+    cur: { t: 'choice', id: 9e6 + 3, style: 'dm', prompt: '23:40。手机同时亮起三条消息。',
+      options: [{ from: 'lauren', label: '睡了吗。今天的提速……还挺快的。' }, { from: 'sam', label: '明天稳吗？董事会在看。' }, { from: 'team', label: '3 号机柜温度又上来了，要不要我先降频？' }] } } };
+  pol.choice = (o) => { const i = o.findIndex((x) => /十二秒|击穿|并肩|两颗糖/.test(x.label)); return i >= 0 ? i : 0; };
+  until((s) => s.day === 18 && s.scene.split && s.cur.t === 'line' && s.cur.who === 'lauren');
+  snaps.split = { st };
+  until((s) => s.day === 24 && s.cur.t === 'line');
+  snaps.feed = { st, feed: true };
+  snaps.archive = { st, panel: 'archive', archive: { seen: ['ntr', 'acquired', 'normal', 'true', 'indie', 'mars', 'fired'], cg: [], bgm: [], shards: [], runs: [], loop2: true, prev: null } };
+  snaps.ending = { st: { ...st, day: 28, ending: 'true', stats: { love: 100, rival: 12, hp: 4, rep: 92 }, flags: { ...st.flags, belShipped: true }, cur: { t: 'ending', id: 9e6 + 4, end: 'true' }, scene: sc({ bg: 'bay', cg: 'true' }) } };
+  return snaps;
+}
+/** 关掉 iframe 里的 CSS 动画与过渡：保证逐帧导出与实时播放一致 */
+const FREEZE_CSS = '*,*::before,*::after{animation-duration:0s!important;animation-delay:0s!important;animation-iteration-count:1!important;transition:none!important}';
+
+function useGameDeck(shots) {
+  const r0 = useRef(null), r1 = useRef(null);
+  const refs = [r0, r1];
+  const [ready, setReady] = useState(false);
+  const snaps = useRef([null, null]);
+  const applied = useRef(['', '']);
+  const gameShots = shots.filter((s) => s.kind === 'game');
+  gameShots.forEach((s, i) => { s.slot = i % 2; });
+  const need = gameShots.length > 0;
+  const apply = (k, key) => {
+    const w = refs[k].current?.contentWindow; const sn = snaps.current[k]?.[key];
+    if (!w?.__g || !sn) return;
+    if (sn.archive) w.__g.setArchive(sn.archive);
+    w.__g.act({ type: 'LOAD', st: sn.st });
+    w.__g.setFeedOpen(!!sn.feed);
+    w.__g.setPanel(sn.panel || null);
+    applied.current[k] = key;
+  };
+  useEffect(() => {
+    if (!need) { setReady(true); return undefined; }
+    let done = 0; let dead = false;
+    const init = (k) => {
+      const w = refs[k].current?.contentWindow;
+      if (dead) return;
+      if (!w || !w.__lib || !w.__g) { setTimeout(() => init(k), 150); return; }
+      const css = w.document.createElement('style'); css.textContent = FREEZE_CSS; w.document.head.appendChild(css);
+      snaps.current[k] = buildSnaps(w.__lib);
+      // 预热：把每个状态都过一遍，让游戏内图片进缓存
+      const keys = Object.keys(snaps.current[k]); let i = 0;
+      const warm = () => { if (dead) return; if (i >= keys.length) { applied.current[k] = ''; if (++done === 2) setReady(true); return; } apply(k, keys[i++]); setTimeout(warm, 450); };
+      warm();
+    };
+    init(0); init(1);
+    return () => { dead = true; };
+  }, []);
+  /** 每个槽位显示"当前或下一个"属于它的镜头的状态 */
+  const sync = (t) => {
+    if (!ready) return;
+    [0, 1].forEach((k) => {
+      const s = gameShots.find((g) => g.slot === k && t < g.b);
+      if (s && applied.current[k] !== s.game) apply(k, s.game);
+    });
+  };
+  return { refs, ready, sync, gameShots, need };
+}
+
+/* ============================================================
+ * 6. 播放器
+ * ============================================================ */
+const XF = 0.35;
+function shotAlpha(s, t) { const xf = s.cut ? 0.04 : XF; return t < s.a - xf || t > s.b ? 0 : bez(prog(t, s.a - xf, s.a)); }
+
+export default function Promo() {
+  const comp = COMPS[COMP_ID];
+  const audio = useRef(null);
+  const [t, setT] = useState(0);
+  const tRef = useRef(0);
+  const [phase, setPhase] = useState(RENDER ? 'render' : 'ready');
+  const [ui, setUi] = useState(true);
+  const [muted, setMuted] = useState(false);
+  const [scale, setScale] = useState(1);
+  const deck = useGameDeck(comp.shots);
+  const drag = useRef(false);
+  const [fontsOk, setFontsOk] = useState(false);
+
+  useEffect(() => {
+    const r = () => setScale(Math.min(window.innerWidth / W, window.innerHeight / H)); r(); window.addEventListener('resize', r);
+    document.fonts?.ready.then(() => setFontsOk(true));
+    // 预加载所有镜头图片
+    const srcs = [A('cg/end_true.jpg'), A('ui/reset_card.webp'), A('ui/reset_card_lauren.webp'), A('avatar/tibo.webp'), A('avatar/lauren.webp')];
+    comp.shots.forEach((s) => [s.src, s.bg].filter(Boolean).forEach((x) => srcs.push(x)));
+    srcs.forEach((src) => { if (IMG[src] === undefined) { const im = new Image(); im.onload = () => { IMG[src] = true; }; im.onerror = () => { IMG[src] = false; }; im.src = src; } });
+    window.__srcs = srcs;
+    return () => window.removeEventListener('resize', r);
+  }, []);
+  useEffect(() => { deck.sync(t); });
+
+  // 逐帧导出接口
+  useEffect(() => {
+    if (!RENDER) return;
+    window.__ready = () => deck.ready && fontsOk && (window.__srcs || []).every((x) => IMG[x] !== undefined);
+    window.__frame = (nt) => new Promise((res) => { tRef.current = nt; setT(nt); requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(res, 20))); });
+    window.__meta = { dur: comp.dur, start: comp.start, audioEnd: comp.audioEnd };
+  }, [deck.ready, fontsOk]);
+
+  // 实时播放：rAF 读取音频真实秒数
+  useEffect(() => {
+    if (RENDER) return undefined;
+    let raf, last = 0;
+    const loop = () => {
+      last = performance.now();
+      const a = audio.current;
+      if (a && !drag.current) {
+        const nt = clamp(a.currentTime - comp.start, 0, comp.dur);
+        if (!a.paused) {
+          const k = Math.min(prog(nt, 0, 0.25), 1 - prog(nt, comp.audioEnd - 1.3, comp.audioEnd));
+          a.volume = muted ? 0 : clamp(k);
+          if (nt >= comp.dur - 0.02) { a.pause(); setPhase('end'); }
+        }
+        tRef.current = nt; setT(nt);
+      }
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    const bg = setInterval(() => { if (performance.now() - last > 300) { cancelAnimationFrame(raf); loop(); } }, 250);
+    return () => { cancelAnimationFrame(raf); clearInterval(bg); };
+  }, [muted]);
+
+  const play = () => { const a = audio.current; if (!a) return; if (phase === 'end' || a.currentTime - comp.start >= comp.dur - 0.05 || a.currentTime < comp.start) a.currentTime = comp.start; a.play().then(() => setPhase('play')).catch(() => setPhase('pause')); };
+  const pause = () => { audio.current?.pause(); setPhase('pause'); };
+  const seek = (nt) => { const a = audio.current; if (!a) return; const v = clamp(nt, 0, comp.dur - 0.05); a.currentTime = comp.start + v; tRef.current = v; setT(v); if (phase === 'end') setPhase('pause'); };
+  const toggle = () => (phase === 'play' ? pause() : play());
+  const full = () => { if (document.fullscreenElement) document.exitFullscreen(); else document.documentElement.requestFullscreen?.().catch(() => {}); };
+  useEffect(() => {
+    if (RENDER) return undefined;
+    let tm; const show = () => { setUi(true); clearTimeout(tm); tm = setTimeout(() => setUi(false), 2200); };
+    window.addEventListener('mousemove', show); return () => { window.removeEventListener('mousemove', show); clearTimeout(tm); };
+  }, []);
+  useEffect(() => {
+    if (RENDER) return undefined;
+    const h = (e) => { if (e.code === 'Space') { e.preventDefault(); phase === 'ready' ? play() : toggle(); } else if (e.key === 'ArrowRight') seek(tRef.current + 5); else if (e.key === 'ArrowLeft') seek(tRef.current - 5); else if (e.key === 'f' || e.key === 'F') full(); else if (e.key === 'm' || e.key === 'M') setMuted((m) => !m); };
+    window.addEventListener('keydown', h); return () => window.removeEventListener('keydown', h);
+  });
+
+  const song = comp.start + t;
+  const visible = comp.shots.map((s, i) => ({ s, i, o: shotAlpha(s, t) })).filter((x) => x.o > 0);
+  const cur = [...comp.shots].reverse().find((s) => t >= s.a) || comp.shots[0];
+  const lyric = t < comp.audioEnd - 0.4 ? LYRICS.find(([a, b]) => song >= a - 0.12 && song < b + 0.1) : null;
+  const lyricO = lyric ? Math.min(prog(song, lyric[0] - 0.12, lyric[0] + 0.12), 1 - prog(song, lyric[1] - 0.1, lyric[1] + 0.1)) : 0;
+  const showUi = !RENDER && (ui || phase !== 'play');
+  const scrub = (e) => { const r = e.currentTarget.getBoundingClientRect(); seek(((e.clientX - r.left) / r.width) * comp.dur); };
+  const fadeAll = COMP_ID === 'mv' ? 1 - prog(t, comp.dur - 1.5, comp.dur) : 1;
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden', cursor: showUi ? 'default' : 'none' }}>
+      <style>{CSS}</style>
+      {!RENDER && <audio ref={audio} src={SONG} preload="auto" />}
+      {/* 1920×1080 画布，等比缩放居中 */}
+      <div style={{ position: 'absolute', left: '50%', top: '50%', width: W, height: H, transform: `translate(-50%,-50%) scale(${scale})`, background: C.ink, overflow: 'hidden' }}>
+        <div style={{ position: 'absolute', inset: 0, opacity: fadeAll }}>
+          {visible.map(({ s, i, o }) => {
+            const R = RENDERERS[s.kind]; const lt = t - s.a; const len = s.b - s.a;
+            return (
+              <div key={i} style={{ position: 'absolute', inset: 0, opacity: o, zIndex: 1 + i * 2 }}>
+                {s.kind === 'game' ? (<><GameFrame /><Caption lt={lt} {...s.cap} /></>) : <R s={s} lt={lt} len={len} live={!RENDER} onPlay={() => { location.href = './index.html#start'; }} />}
+              </div>
+            );
+          })}
+          {/* 实机画面（两个游戏实例），层级紧贴所属镜头 */}
+          {deck.need && [0, 1].map((k) => {
+            const s = deck.gameShots.find((g) => g.slot === k && t >= g.a - (g.cut ? 0.04 : XF) && t <= g.b);
+            const o = s ? shotAlpha(s, t) : 0;
+            const z = s ? lerp(1, 1.035, smooth((t - s.a) / (s.b - s.a))) : 1;
+            return (
+              <div key={k} style={{ position: 'absolute', left: GAME_RECT.x, top: GAME_RECT.y, width: GAME_RECT.w, height: GAME_RECT.h, overflow: 'hidden', opacity: o, zIndex: s ? 2 + comp.shots.indexOf(s) * 2 : 0, pointerEvents: 'none', visibility: o > 0 ? 'visible' : 'hidden' }}>
+                <iframe ref={deck.refs[k]} src="./index.html?promo" title={`game-${k}`} style={{ width: 1920, height: 1080, border: 0, transformOrigin: '0 0', transform: `scale(${(GAME_RECT.w / 1920) * z}) translate(${-(z - 1) * 960}px, ${-(z - 1) * 540}px)` }} />
+              </div>
+            );
+          })}
+          <Particles t={t} shot={cur} />
+        </div>
+        {/* 遮幅：上方段落标签，下方歌词 */}
+        <div style={{ position: 'absolute', left: 0, right: 0, top: 0, height: BAR, background: '#000', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '0 120px' }}>
+          <Mono size={15} color="rgba(236,230,218,.5)" ls=".4em">{cur.label ?? ''}</Mono>
+          <Mono size={15} color="rgba(236,230,218,.35)" ls=".4em">相恋 ～ 直到 TOKENS 耗尽</Mono>
+        </div>
+        <div style={{ position: 'absolute', left: 0, right: 0, bottom: 0, height: BAR, background: '#000', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+          {lyric && <div style={{ fontFamily: SERIF, fontWeight: 500, fontSize: 34, letterSpacing: '.14em', color: C.bone, opacity: lyricO * fadeAll, transform: `translateY(${(1 - lyricO) * 6}px)` }}>{lyric[2]}</div>}
+        </div>
+        <div className="pv-grain" />
+        <div style={{ position: 'absolute', inset: 0, zIndex: 520, pointerEvents: 'none', background: 'radial-gradient(ellipse 80% 75% at 50% 50%, transparent 62%, rgba(0,0,0,.4))' }} />
+      </div>
+
+      {phase === 'ready' && (
+        <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'rgba(5,5,8,.95)', zIndex: 800, color: C.bone }}>
+          <Mono size={12} color={C.pink} ls=".6em">{comp.title}</Mono>
+          <div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 'min(10vw,120px)', letterSpacing: '.18em', marginTop: 14 }}>相恋</div>
+          <div style={{ fontFamily: SERIF, fontSize: 'min(2.6vw,30px)', letterSpacing: '.3em', color: 'rgba(236,230,218,.8)' }}>～ 直到 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', color: C.pink, letterSpacing: 0 }}>tokens</span> 耗尽 ～</div>
+          <button onClick={play} disabled={!deck.ready} className="pv-btn solid" style={{ marginTop: 40, opacity: deck.ready ? 1 : 0.4 }}>{deck.ready ? '▶ 播放' : '载入实机画面…'}</button>
+          <div style={{ display: 'flex', gap: 28, marginTop: 26 }}>
+            <a className="pv-link" href={COMP_ID === 'mv' ? './promo.html' : './promo.html?comp=mv'}>{COMP_ID === 'mv' ? '看宣传片 · 60s' : '看主题曲 MV · 3:28'}</a>
+            <a className="pv-link" href="./index.html">返回游戏标题</a>
+          </div>
+        </div>
+      )}
+      {!RENDER && phase !== 'ready' && (
+        <div className="pv-bar" style={{ opacity: showUi ? 1 : 0, pointerEvents: showUi ? 'auto' : 'none' }}>
+          <button onClick={toggle} className="pv-icon">{phase === 'play' ? '❚❚' : '▶'}</button>
+          <Mono size={12} color="rgba(236,230,218,.75)" ls=".1em" style={{ minWidth: 104 }}>{fmt(t)} / {fmt(comp.dur)}</Mono>
+          <div className="pv-track" onPointerDown={(e) => { drag.current = true; e.currentTarget.setPointerCapture(e.pointerId); scrub(e); }} onPointerMove={(e) => { if (drag.current) scrub(e); }} onPointerUp={() => { drag.current = false; }}>
+            <div style={{ position: 'absolute', left: 0, top: '50%', height: 2, width: `${(t / comp.dur) * 100}%`, background: C.pink, transform: 'translateY(-50%)' }} />
+            {comp.marks.map(([mt, name]) => (
+              <button key={name} className="pv-act" onPointerDown={(e) => e.stopPropagation()} onClick={(e) => { e.stopPropagation(); seek(mt + 0.01); }} style={{ left: `${(mt / comp.dur) * 100}%`, color: t >= mt ? C.bone : 'rgba(236,230,218,.4)' }}><span>{name}</span><i /></button>
+            ))}
+            <div style={{ position: 'absolute', top: '50%', left: `${(t / comp.dur) * 100}%`, width: 10, height: 10, borderRadius: 9, background: C.bone, transform: 'translate(-50%,-50%)' }} />
+          </div>
+          <button onClick={() => setMuted((m) => !m)} className="pv-icon">{muted ? '🔇' : '🔊'}</button>
+          <button onClick={full} className="pv-icon">⛶</button>
+          <a href={COMP_ID === 'mv' ? './promo.html' : './promo.html?comp=mv'} className="pv-link">{COMP_ID === 'mv' ? '宣传片' : 'MV'}</a>
+          <a href="./index.html" className="pv-link">返回标题</a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** 粒子：t 的纯函数（导出逐帧可复现）。雨夜镜头下雨，片尾升起 Token 光斑，其余是极淡的尘埃 */
+function Particles({ t, shot }) {
+  const ref = useRef(null);
+  const mode = shot.kind === 'end' ? 'tokens' : /rain|duel|ntr|street/.test(shot.src || shot.bg || '') ? 'rain' : 'dust';
+  useEffect(() => {
+    const cv = ref.current; const ctx = cv.getContext('2d');
+    if (cv.width !== W) { cv.width = W; cv.height = H; }
+    ctx.clearRect(0, 0, W, H);
+    for (let i = 0; i < 160; i++) {
+      const r1 = hash(i), r2 = hash(i + 99), r3 = hash(i + 7);
+      if (mode === 'rain') {
+        const y = ((r1 + t * (1.1 + r2 * 0.8)) % 1.2) - 0.1, x = (r3 - t * 0.04 + 2) % 1;
+        ctx.strokeStyle = `rgba(200,215,235,${0.08 + r2 * 0.14})`; ctx.lineWidth = 1; ctx.beginPath(); ctx.moveTo(x * W, BAR + y * AREA_H); ctx.lineTo(x * W - 4, BAR + y * AREA_H + 20 + r2 * 22); ctx.stroke();
+      } else if (mode === 'tokens') {
+        if (i > 90) continue;
+        const y = 1 - ((r1 + t * (0.03 + r2 * 0.05)) % 1), x = r3 + Math.sin(t * 0.5 + i) * 0.01;
+        ctx.fillStyle = i % 2 ? `rgba(242,166,198,${0.2 + r2 * 0.45})` : `rgba(217,180,106,${0.2 + r2 * 0.45})`;
+        ctx.beginPath(); ctx.arc(x * W, BAR + y * AREA_H, 1 + r2 * 2.4, 0, 7); ctx.fill();
+      } else {
+        if (i > 60) continue;
+        const y = 1 - ((r1 + t * 0.012) % 1);
+        ctx.fillStyle = `rgba(236,230,218,${0.04 + r2 * 0.08})`; ctx.fillRect(r3 * W, BAR + y * AREA_H, 1.4, 1.4);
+      }
+    }
+  });
+  return <canvas ref={ref} style={{ position: 'absolute', inset: 0, width: W, height: H, zIndex: 400, pointerEvents: 'none', mixBlendMode: 'screen' }} />;
+}
+
+const GRAIN = "url(\"data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='180' height='180'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%25' height='100%25' filter='url(%23n)' opacity='.6'/></svg>\")";
+const CSS = `
+@import url('https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,500;0,700;1,500;1,700&family=JetBrains+Mono:wght@400;700&family=Noto+Serif+SC:wght@500;700;900&display=swap');
+html,body{margin:0;background:#000}
+@keyframes grain{0%{transform:translate(0,0)}25%{transform:translate(-5%,3%)}50%{transform:translate(4%,-4%)}75%{transform:translate(-3%,-2%)}100%{transform:translate(0,0)}}
+.pv-grain{position:absolute;inset:-50%;z-index:510;pointer-events:none;background-image:${GRAIN};opacity:.06;mix-blend-mode:overlay;animation:grain .9s steps(4) infinite}
+.pv-btn{font-family:${SERIF};font-size:16px;letter-spacing:.3em;padding:12px 30px;color:#ece6da;background:transparent;border:1px solid rgba(236,230,218,.45);cursor:pointer;transition:all .35s cubic-bezier(0.16,1,0.3,1)}
+.pv-btn.solid{background:#ece6da;color:#0b0a0e}
+.pv-btn.solid:hover{background:#f2a6c6}
+.pv-link{font-family:${MONO};font-size:11px;letter-spacing:.3em;color:rgba(236,230,218,.55);text-decoration:none}
+.pv-link:hover{color:#fff}
+.pv-bar{position:absolute;left:0;right:0;bottom:0;z-index:900;display:flex;align-items:center;gap:16px;padding:22px 28px 18px;background:linear-gradient(transparent,rgba(5,5,8,.92));transition:opacity .4s cubic-bezier(0.16,1,0.3,1)}
+.pv-icon{width:34px;height:34px;display:flex;align-items:center;justify-content:center;color:#ece6da;background:rgba(5,5,8,.5);border:1px solid rgba(236,230,218,.2);cursor:pointer;font-size:12px}
+.pv-track{position:relative;flex:1;height:30px;cursor:pointer;touch-action:none}
+.pv-track::before{content:'';position:absolute;left:0;right:0;top:50%;height:2px;background:rgba(236,230,218,.15);transform:translateY(-50%)}
+.pv-act{position:absolute;top:-6px;background:none;border:0;padding:0;cursor:pointer;font-family:${MONO};font-size:10px;letter-spacing:.15em;white-space:nowrap}
+.pv-act i{position:absolute;left:0;top:16px;width:1px;height:10px;background:currentColor}
+`;
+
+import { createRoot } from 'react-dom/client';
+createRoot(document.getElementById('root')).render(<Promo />);
+</script>
+</body>
+</html>
