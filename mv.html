@@ -1,0 +1,1593 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>《相恋～直到 tokens 耗尽》主题曲 MV</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://unpkg.com/@babel/standalone@7.26.4/babel.min.js"></script>
+<script type="importmap">
+{ "imports": {
+  "react": "https://esm.sh/react@18.3.1",
+  "react-dom/client": "https://esm.sh/react-dom@18.3.1/client?external=react",
+  "lucide-react": "https://esm.sh/lucide-react@0.460.0?external=react"
+} }
+</script>
+<style>html,body{margin:0;background:#05060d}</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel" data-type="module" data-presets="react">
+/**
+ * 《相恋直到 tokens 耗尽》主题曲 MV · v2（音频驱动 × 2.5D 虚拟摄像机 × 动态字体）
+ * 非官方虚构同人作品：角色为项目原有二次元立绘，剧情虚构；不使用真人照片，不合成人声。
+ *
+ * 运行：node build.js → mv.html（浏览器边放歌边看，可拖进度条）
+ *       mv.html?render=1 → 逐帧导出模式（.claude/render/render.py mvk：60fps、2 倍超采样）
+ *
+ * 时间轴不是手估的：全部来自 assets/mv/audio_features.json（.claude/audio_analysis/features.py 生成）
+ *   - lines[i].tok[j]：第 i 句第 j 个字（英文按字母）的开口 / 收尾时间（Demucs 人声分轨 + Whisper 逐字 + 人声起音吸附）
+ *   - kicks / onsets：鼓分轨上的底鼓与瞬态；env.kick / env.rms：60fps 包络，驱动镜头脉冲、辉光、UI 微颤
+ * 镜头切点 = 对应歌词开口 − 2 帧；大字冲击 = 对应字开口 − 2 帧。
+ * 所有画面都是歌曲时间 t 的纯函数：没有 CSS 动画、没有真实时钟、没有 Math.random；位移全部用浮点 transform（亚像素）。
+ */
+import React, { createContext, useContext, useEffect, useRef, useState } from 'react';
+
+/* ============================================================
+ * 0. 常量 / 工具
+ * ============================================================ */
+const A = (p) => `./assets/${p}`;
+const CUT = (n) => A(`mv/cut/${n}.webp`);
+const W = 1920, H = 1080;
+const DUR = 208.36;
+const SONG = A('bgm/src/theme_tokens.m4a');
+const RENDER = new URLSearchParams(location.search).get('render') === '1';
+const C = { ink: '#050508', bone: '#ece6da', cyan: '#8fe0d2', pink: '#f2a6c6', hot: '#ff5fa2', gold: '#d8b46a', red: '#ff4d3d', violet: '#c9a6ff', green: '#9be7c4', potato: '#d9b46a', dim: 'rgba(236,230,218,.55)', mag: '#ff3fb4' };
+const SERIF = '"Noto Serif SC","Source Han Serif SC",SimSun,serif';
+const SANS = '"Noto Sans SC","Microsoft YaHei",sans-serif';
+const DISPLAY = 'Georgia,"Times New Roman",serif';
+const MONO = 'Consolas,"Source Code Pro",monospace';
+const LEAD = 2 / 60;                               // 视觉比声音提前 2 帧
+const clamp = (v, a = 0, b = 1) => Math.max(a, Math.min(b, v));
+const lerp = (a, b, k) => a + (b - a) * k;
+const prog = (t, a, b) => clamp((t - a) / (b - a));
+const outExpo = (x) => (x >= 1 ? 1 : 1 - Math.pow(2, -10 * clamp(x)));
+const inOut = (x) => { x = clamp(x); return x < 0.5 ? 4 * x * x * x : 1 - Math.pow(-2 * x + 2, 3) / 2; };
+const inExpo = (x) => (x <= 0 ? 0 : Math.pow(2, 10 * clamp(x) - 10));
+/** 冲击曲线：前 15% 时间冲到 90%（Expo Out），后 85% 做阻尼漂移到 100% —— 动如脱兔，静如处子 */
+const hitE = (x) => { x = clamp(x); return x < 0.15 ? 0.9 * outExpo(x / 0.15) : 0.9 + 0.1 * (1 - Math.pow(1 - (x - 0.15) / 0.85, 2)); };
+/** 弹簧过冲：s 秒内快速冲过头再收回 */
+const sprE = (s, k = 11, w = 17) => (s <= 0 ? 0 : 1 - Math.exp(-k * s) * Math.cos(w * s));
+const hash = (n) => { const x = Math.sin(n * 127.1 + 311.7) * 43758.5453; return x - Math.floor(x); };
+const fmtN = (n) => Math.round(n).toLocaleString('en-US');
+const GLYPHS = 'アイウエオカキクケコサシスセソタチツテト0123456789#$%&@<>/{}[]=+*ΞΣΔ';
+const frameNo = (t) => Math.floor(t * 60 + 1e-6);
+
+/* ============================================================
+ * 1. 音频特征（features.py 产出）
+ * ============================================================ */
+let AF = null;
+const env = (name, t) => {
+  if (!AF) return 0; const a = AF.env[name]; const x = t * AF.fps; const i = Math.floor(x);
+  if (i < 0 || i >= a.length - 1) return 0; return a[i] + (a[i + 1] - a[i]) * (x - i);
+};
+const kick = (t) => env('kick', t);
+const rms = (t) => env('rms', t);
+const toks = (s) => (s.match(/[A-Za-z]|[一-鿿]/g) || []).map((x) => x.toLowerCase());
+const MISS = [];
+/** 第 i 句里词 word（第 nth 次出现）的 token 位置 */
+function wordPos(i, word, nth = 0) {
+  const L = AF.lines[i], tk = L.tokens, w = toks(word);
+  let seen = 0;
+  for (let p = 0; p + w.length <= tk.length; p++) {
+    if (w.every((x, q) => tk[p + q] === x)) { if (seen === nth) return [p, p + w.length - 1]; seen++; }
+  }
+  if (!MISS.includes(`${i}:${word}`)) MISS.push(`${i}:${word}`); return [0, tk.length - 1];
+}
+const WT = (i, word, nth) => AF.lines[i].tok[wordPos(i, word, nth)[0]][0] - LEAD;
+const WE = (i, word, nth) => AF.lines[i].tok[wordPos(i, word, nth)[1]][1];
+const LS = (i) => AF.lines[i].start - LEAD;
+const LE = (i) => AF.lines[i].end;
+const tokTimes = (i, from, to, a = 0) => AF.lines[i].tok.slice(wordPos(i, from)[0], to ? wordPos(i, to)[1] + 1 : undefined).map((x) => x[0] - LEAD - a);
+/** 最近的强底鼓（±win 内，强度 >0.3）；没有就退回最近的节拍 */
+function K(t, win = 0.22) {
+  let best = null;
+  for (const [kt, s] of AF.kicks) if (s > 0.3 && Math.abs(kt - t) <= win && (best == null || Math.abs(kt - t) < Math.abs(best - t))) best = kt;
+  if (best == null) best = AF.beats.reduce((b, x) => (Math.abs(x - t) < Math.abs(b - t) ? x : b), AF.beats[0]);
+  return best - LEAD;
+}
+/** 自 t 往前最近一次（强度 ≥ minS）底鼓 / 瞬态的时间与序号 */
+function lastKick(t, minS = 0.3, from = 0) {
+  let k = null, n = 0;
+  for (const [kt, s] of AF.kicks) { if (kt - LEAD > t) break; if (s >= minS && kt >= from) { k = kt - LEAD; n++; } }
+  return { at: k, n };
+}
+function lastOnset(t, minS = 0.15, from = 0) {
+  let k = null, n = 0;
+  for (const [ot, s] of AF.onsets) { if (ot - LEAD > t) break; if (s >= minS && ot >= from) { k = ot - LEAD; n++; } }
+  return { at: k, n };
+}
+function beatsSince(t, a) { let n = 0; for (const b of AF.beats) { if (b - LEAD > t) break; if (b - LEAD >= a) n++; } return n; }
+function lastBeatT(t) { let last = -9; for (const b of AF.beats) { if (b - LEAD > t) break; last = b - LEAD; } return last; }
+function beatsAt(a, i) { const bs = AF.beats.filter((b) => b - LEAD >= a - 0.01); return (bs[i] ?? a + i * 0.46) - LEAD; }
+/** 节拍脉冲：最近一拍后的指数衰减 */
+const beatPulse = (t, d = 7) => Math.exp(-(t - lastBeatT(t)) * d);
+
+/* ============================================================
+ * 2. 虚拟摄像机 + 景深层
+ * ============================================================ */
+const Cam = createContext({ x: 0, y: 0, z: 1, r: 0, bump: 0, t: 0 });
+/** 景深层：0.2–0.3 远景，0.5–0.6 中景大字 / UI，0.9 人物，1.5 前景氛围 */
+function L({ d = 0.55, children, style }) {
+  const c = useContext(Cam);
+  const s = (1 + (c.z - 1) * d) * (1 + c.bump * 0.014 * d);
+  return <div style={{ position: 'absolute', inset: 0, transform: `translate3d(${(c.x * d).toFixed(3)}px,${(c.y * d).toFixed(3)}px,0) rotate(${(c.r * d).toFixed(4)}deg) scale(${s.toFixed(5)})`, willChange: 'transform', ...style }}>{children}</div>;
+}
+const Abs = ({ children, style }) => <div style={{ position: 'absolute', ...style }}>{children}</div>;
+const Full = ({ children, style }) => <div style={{ position: 'absolute', inset: 0, ...style }}>{children}</div>;
+const Center = ({ children, style }) => <div style={{ position: 'absolute', inset: 0, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', ...style }}>{children}</div>;
+const Mono = ({ children, size = 18, color = C.dim, ls = '.25em', style }) => <div style={{ fontFamily: MONO, fontSize: size, color, letterSpacing: ls, whiteSpace: 'pre', ...style }}>{children}</div>;
+function Img({ src, style, fit = 'cover', pos = 'center' }) {
+  return <img src={src} alt="" draggable={false} style={{ position: 'absolute', inset: 0, width: '100%', height: '100%', objectFit: fit, objectPosition: pos, ...style }} />;
+}
+/** 远景：景深 0.25，默认高斯模糊 + 暗角；底鼓时额外 1.0→1.02 脉冲 */
+function Bg({ src, blur = 4, bright = 0.5, sat = 1, tint, d = 0.25, vig = 0.75 }) {
+  const c = useContext(Cam);
+  return (
+    <L d={d}>
+      <div style={{ position: 'absolute', inset: -60, transform: `scale(${(1.04 + c.bump * 0.02).toFixed(5)})`, filter: `blur(${blur}px) brightness(${bright}) saturate(${sat})` }}><Img src={src} /></div>
+      {tint && <Full style={{ background: tint }} />}
+      <Full style={{ background: `radial-gradient(ellipse 70% 65% at 50% 50%, transparent 35%, rgba(0,0,0,${vig}))` }} />
+    </L>
+  );
+}
+/** 赛博网格远景（给没有背景图的 UI 镜头当远景层） */
+function Grid({ t, color = C.cyan, op = 0.22 }) {
+  const off = (((t * 60) % 80) + 80) % 80;
+  const lines = [];
+  for (let i = -12; i <= 12; i++) lines.push(<line key={'v' + i} x1={960 + i * 160} y1={1080} x2={960 + i * 30} y2={560} stroke={color} strokeWidth={1.5} />);
+  for (let j = 0; j < 9; j++) { const y = 560 + Math.pow((j * 80 + off) / 720, 2) * 520; lines.push(<line key={'h' + j} x1={0} y1={y} x2={W} y2={y} stroke={color} strokeWidth={1.2} />); }
+  return (
+    <L d={0.2}>
+      <svg width={W} height={H} style={{ position: 'absolute', inset: 0, opacity: op, filter: 'blur(1.2px)' }}>{lines}</svg>
+      <Full style={{ background: 'radial-gradient(ellipse 70% 65% at 50% 40%, transparent 30%, rgba(0,0,0,.8))' }} />
+    </L>
+  );
+}
+/** 主角立绘：景深 0.9；入场用 transform（不用 left/top，避免整像素吸附）；轮廓光随底鼓闪烁；环境光沿边缘融合 */
+function Cut({ name, lt = 9, x = 960, h = 1000, y = 1080, from = 0, fromY = 0, delay = 0, rim, light, lightDir = 90, op = 1, clip, scale = 1, filter = '', ar = 0.75, d = 0.9, dur = 1.1 }) {
+  const c = useContext(Cam);
+  const k = hitE((lt - delay) / dur);
+  const w = h * ar * scale, hh = h * scale;
+  const glow = rim ? `drop-shadow(0 0 2px ${rim}) drop-shadow(0 0 ${(18 + c.bump * 26).toFixed(2)}px ${rim}${Math.round(clamp(0.45 + c.bump * 0.5) * 255).toString(16).padStart(2, '0')})` : '';
+  return (
+    <L d={d}>
+      <div style={{ position: 'absolute', left: 0, top: 0, width: w, height: hh, opacity: op * clamp((lt - delay) * 6),
+        transform: `translate3d(${(x - w / 2 + (1 - k) * from).toFixed(3)}px, ${(y - hh + (1 - k) * fromY).toFixed(3)}px, 0)`,
+        filter: `${glow} ${filter}`, clipPath: clip, willChange: 'transform' }}>
+        <Img src={CUT(name)} fit="contain" pos="bottom" />
+        {light && <div style={{ position: 'absolute', inset: 0, WebkitMaskImage: `url(${CUT(name)})`, WebkitMaskSize: 'contain', WebkitMaskRepeat: 'no-repeat', WebkitMaskPosition: 'bottom center', background: `linear-gradient(${lightDir}deg, ${light} 0%, transparent 38%)`, mixBlendMode: 'screen', opacity: 0.42 + c.bump * 0.25 }} />}
+      </div>
+    </L>
+  );
+}
+/** 前景氛围层：景深 1.5，失焦的雨丝 / 散景光斑 / 代码残片 / 花瓣 */
+const CODE_BITS = ['tokens -= 1', 'git reset --hard', 'ship()', 'quota: 0', 'while(true) love++', '429', 'poteto.com', 'RESET?', '0x1F94', 'await you()', 'H200 · 109°C', 'ctx 500,000'];
+function FG({ kind, t, color = C.pink, n }) {
+  if (!kind) return null;
+  const items = [];
+  if (kind === 'rain') {
+    for (let i = 0; i < (n || 34); i++) {
+      const r1 = hash(i * 3.1), r2 = hash(i * 7.7 + 1), r3 = hash(i * 1.9 + 5);
+      const y = ((r1 + t * (1.1 + r2 * 0.9)) % 1.3) - 0.15, x = (((r3 - t * 0.04) % 1) + 1) % 1;
+      items.push(<line key={i} x1={x * W} y1={y * H} x2={x * W - 18} y2={y * H + 120 + r2 * 120} stroke="rgba(210,225,245,.28)" strokeWidth={3 + r2 * 5} strokeLinecap="round" />);
+    }
+    return <L d={1.5}><svg width={W} height={H} style={{ position: 'absolute', inset: 0, filter: 'blur(3px)' }}>{items}</svg></L>;
+  }
+  if (kind === 'bokeh' || kind === 'petal') {
+    for (let i = 0; i < (n || 16); i++) {
+      const r1 = hash(i * 2.3), r2 = hash(i * 5.1 + 2), r3 = hash(i * 8.7 + 3);
+      const y = 1.15 - ((r1 + t * (0.02 + r2 * 0.03)) % 1.3), x = r3 + Math.sin(t * 0.3 + i) * 0.02;
+      const rr = kind === 'petal' ? 10 + r2 * 18 : 34 + r2 * 70;
+      items.push(<circle key={i} cx={x * W} cy={y * H} r={rr * (1 + kick(t) * 0.12)} fill={i % 3 === 0 ? C.gold : color} opacity={0.12 + r1 * 0.16} />);
+    }
+    return <L d={1.5}><svg width={W} height={H} style={{ position: 'absolute', inset: 0, filter: `blur(${kind === 'petal' ? 4 : 12}px)`, mixBlendMode: 'screen' }}>{items}</svg></L>;
+  }
+  if (kind === 'code') {
+    return (
+      <L d={1.5}>
+        {CODE_BITS.slice(0, n || 9).map((s, i) => {
+          const r1 = hash(i * 4.3), r2 = hash(i * 9.1 + 1), y = 1.1 - ((r1 + t * (0.025 + r2 * 0.03)) % 1.25);
+          return <Abs key={i} style={{ left: 0, top: 0, transform: `translate3d(${(hash(i * 6.7) * 1700).toFixed(1)}px,${(y * H).toFixed(2)}px,0)`, fontFamily: MONO, fontSize: 30 + r2 * 40, color: i % 2 ? C.cyan : color, opacity: 0.18 + r2 * 0.16, filter: `blur(${(2.5 + r2 * 3).toFixed(1)}px)`, whiteSpace: 'nowrap' }}>{s}</Abs>;
+        })}
+      </L>
+    );
+  }
+  return null;
+}
+
+/* ============================================================
+ * 3. 文字组件
+ * ============================================================ */
+/** 逐字动效。lt = 文字自己的时钟；times = 每个字自己的开口时间（与 lt 同一时钟）。mode: rise / slam / drop / spread / scatter / blur */
+function Chars({ text, lt, mode = 'rise', size = 120, color = C.bone, font = SERIF, weight = 900, ls = 0.06, stagger = 0.045, dur = 1.0, align = 'center', italic, outline, shadow, lh = 1.1, seed = 1, times }) {
+  const chars = [...text];
+  let ci = -1;
+  return (
+    <div style={{ fontFamily: font, fontWeight: weight, fontSize: size, lineHeight: lh, letterSpacing: `${ls}em`, textAlign: align, fontStyle: italic ? 'italic' : 'normal', whiteSpace: 'pre', color: outline ? 'transparent' : color, WebkitTextStroke: outline ? `${outline}px ${color}` : undefined, textShadow: shadow }}>
+      {chars.map((ch, i) => {
+        if (ch === '\n') return <br key={i} />;
+        if (ch.trim()) ci++;
+        const s = times ? lt - (times[Math.min(Math.max(ci, 0), times.length - 1)] ?? 0) : lt - i * stagger;
+        const e = hitE(s / dur), sp = sprE(s);
+        const r = hash(i * 13 + seed);
+        let tf = '';
+        const o = clamp(s * 14);
+        if (mode === 'rise') tf = `translate3d(0,${((1 - e) * 70).toFixed(2)}%,0)`;
+        else if (mode === 'drop') tf = `translate3d(0,${((1 - clamp(sp, 0, 1.2)) * -160).toFixed(2)}%,0) rotate(${((1 - clamp(sp)) * (r - 0.5) * 40).toFixed(2)}deg)`;
+        else if (mode === 'slam') tf = `scale(${lerp(2.6, 1, clamp(sp, 0, 1.15)).toFixed(4)})`;
+        else if (mode === 'spread') tf = `translate3d(${((1 - e) * (i - chars.length / 2) * 70).toFixed(2)}px,0,0)`;
+        else if (mode === 'scatter') tf = `translate3d(${((1 - e) * (r - 0.5) * 900).toFixed(2)}px,${((1 - e) * (hash(i + seed * 7) - 0.5) * 600).toFixed(2)}px,0) rotate(${((1 - e) * (r - 0.5) * 180).toFixed(2)}deg)`;
+        else if (mode === 'blur') tf = `scale(${lerp(1.35, 1, e).toFixed(4)})`;
+        return <span key={i} style={{ display: 'inline-block', transform: tf, opacity: o, filter: mode === 'blur' ? `blur(${((1 - e) * 18).toFixed(2)}px)` : undefined }}>{ch === ' ' ? ' ' : ch}</span>;
+      })}
+    </div>
+  );
+}
+/** 赛博解码：从左到右逐字锁定；未锁定的字每帧刷新乱码；锁定瞬间青 / 品红双色差闪光（times = 每个字的锁定时刻，绝对时间） */
+function Decode({ text, t, at, size = 80, color = C.bone, font = MONO, weight = 700, ls = 0.12, step = 0.06, scramble = 0.35, times, italic }) {
+  const f = frameNo(t);
+  let ci = -1;
+  return (
+    <div style={{ fontFamily: font, fontWeight: weight, fontSize: size, letterSpacing: `${ls}em`, whiteSpace: 'pre', fontStyle: italic ? 'italic' : 'normal', lineHeight: 1.1 }}>
+      {[...text].map((ch, i) => {
+        if (ch === ' ') return <span key={i}> </span>;
+        ci++;
+        const lock = times ? times[Math.min(ci, times.length - 1)] : at + scramble + ci * step;
+        const appear = Math.min(at + ci * step * 0.5, lock - 0.05);
+        if (t < appear) return <span key={i} style={{ opacity: 0 }}>{ch}</span>;
+        if (t < lock) {
+          const g = GLYPHS[Math.floor(hash(f * 31 + i * 7.3) * GLYPHS.length)];
+          return <span key={i} style={{ display: 'inline-block', color: 'rgba(143,224,210,.75)', opacity: 0.55 + 0.45 * hash(f + i), fontWeight: 400, width: '0.9em', textAlign: 'center' }}>{g}</span>;
+        }
+        const k = Math.exp(-(t - lock) / 0.09);
+        return <span key={i} style={{ display: 'inline-block', color, transform: `scale(${(1 + k * 0.18).toFixed(4)})`, textShadow: k > 0.02 ? `${(-7 * k).toFixed(2)}px 0 rgba(0,240,255,${(0.9 * k).toFixed(3)}), ${(7 * k).toFixed(2)}px 0 rgba(255,40,190,${(0.9 * k).toFixed(3)})` : 'none', filter: k > 0.02 ? `brightness(${(1 + k * 0.8).toFixed(3)})` : undefined }}>{ch}</span>;
+      })}
+    </div>
+  );
+}
+/** 笔画描边：SVG 文字描边画出，再填色 */
+function Stroke({ text, lt, size = 300, color = C.pink, w = 1600, h = 400, dur = 1.0, fillAt = 0.8, font = SERIF, weight = 900, sw = 3 }) {
+  const k = hitE(lt / dur), f = prog(lt, fillAt, fillAt + 0.35);
+  return (
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} style={{ overflow: 'visible' }}>
+      <text x="50%" y="50%" dominantBaseline="central" textAnchor="middle" fontFamily={font} fontWeight={weight} fontSize={size} fill={color} fillOpacity={f} stroke={color} strokeWidth={sw} strokeDasharray="2600" strokeDashoffset={2600 * (1 - k)} style={{ paintOrder: 'stroke' }}>{text}</text>
+    </svg>
+  );
+}
+/** 故障切片：按帧号确定性地切 3 条水平带并错位，带色散 */
+function Glitch({ children, t, amt = 1, seed = 3 }) {
+  const f = frameNo(t);
+  if (amt < 0.03) return <div style={{ position: 'relative' }}>{children}</div>;
+  const sl = (j) => { const y0 = hash(f * 3 + j + seed) * 92; return `inset(${y0.toFixed(2)}% 0 ${Math.max(0, 100 - y0 - 4 - hash(f + j) * 16).toFixed(2)}% 0)`; };
+  const dx = (j) => ((hash(f * 5 + j + seed) - 0.5) * 90 * amt).toFixed(2);
+  return (
+    <div style={{ position: 'relative' }}>
+      <div>{children}</div>
+      {[0, 1, 2].map((j) => (
+        <div key={j} style={{ position: 'absolute', inset: 0, clipPath: sl(j), transform: `translate3d(${dx(j)}px,0,0)`, filter: j === 0 ? 'drop-shadow(-8px 0 rgba(0,240,255,.9))' : j === 1 ? 'drop-shadow(8px 0 rgba(255,40,190,.9))' : 'none' }}>{children}</div>
+      ))}
+    </div>
+  );
+}
+function PathText({ text, t, d, size = 64, color = C.bone, speed = 300, font = DISPLAY, italic = true, opacity = 1, id = 'p' }) {
+  return (
+    <svg width={W} height={H} viewBox={`0 0 ${W} ${H}`} style={{ position: 'absolute', inset: 0, opacity }}>
+      <defs><path id={id} d={d} /></defs>
+      <text fontFamily={font} fontSize={size} fontStyle={italic ? 'italic' : 'normal'} fill={color} letterSpacing="6"><textPath href={`#${id}`} startOffset={-((t * speed) % 2400)}>{text}</textPath></text>
+    </svg>
+  );
+}
+function Bubble({ who = 'lauren', text, k = 1, side = 'left', w = 520, size = 34 }) {
+  const ink = who === 'lauren' ? C.pink : who === 'tibo' ? C.cyan : who === 'dario' ? C.gold : C.bone;
+  const e = clamp(sprE(k), 0, 1.15);
+  return (
+    <div style={{ display: 'flex', justifyContent: side === 'left' ? 'flex-start' : 'flex-end', transform: `scale(${lerp(0.5, 1, e).toFixed(4)})`, transformOrigin: side === 'left' ? 'left bottom' : 'right bottom', opacity: clamp(k * 12) }}>
+      <div style={{ maxWidth: w, padding: '18px 26px', borderRadius: 26, background: side === 'left' ? 'rgba(30,22,36,.92)' : ink, color: side === 'left' ? C.bone : '#14101a', border: side === 'left' ? `2px solid ${ink}` : 'none', fontFamily: SANS, fontSize: size, lineHeight: 1.4, fontWeight: 500, boxShadow: '0 30px 60px -20px #000' }}>{text}</div>
+    </div>
+  );
+}
+function Tweet({ who, name, handle, text, meta, w = 900, size = 40, k = 1 }) {
+  const ink = who === 'lauren' ? C.pink : C.cyan;
+  const e = hitE(k / 0.9);
+  return (
+    <div style={{ width: w, background: 'rgba(10,10,14,.94)', border: '1px solid rgba(236,230,218,.18)', borderLeft: `4px solid ${ink}`, padding: '26px 32px', boxShadow: '0 50px 100px -30px #000', transform: `translate3d(0,${((1 - e) * 140).toFixed(2)}px,0) rotate(${((1 - e) * -6).toFixed(3)}deg)`, opacity: clamp(k * 10) }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 16 }}>
+        <div style={{ position: 'relative', width: 58, height: 58, borderRadius: 8, overflow: 'hidden' }}><Img src={A(`avatar/${who}.webp`)} /></div>
+        <div><div style={{ fontFamily: SANS, fontWeight: 700, fontSize: 26, color: C.bone }}>{name}</div><Mono size={18} ls=".05em">{handle}{meta ? ` · ${meta}` : ''}</Mono></div>
+      </div>
+      <div style={{ fontFamily: SANS, fontSize: size, color: C.bone, marginTop: 18, lineHeight: 1.4 }}>{text}</div>
+    </div>
+  );
+}
+const POTATO = (s = 60, c = C.potato) => <svg width={s} height={s * 0.8} viewBox="0 0 20 16"><path d="M3 8c0-4 4-7 8-6.5 4 .5 7 3 6.5 6.8C17 12 13 15 9 14.6 5 14.2 3 11.5 3 8z" fill={c} /><circle cx="7" cy="7" r=".9" fill="#5b3b1a" /><circle cx="12" cy="6" r=".8" fill="#5b3b1a" /><circle cx="10.5" cy="10.5" r=".7" fill="#5b3b1a" /></svg>;
+/** UI 微颤：底鼓时 ±s px */
+const jit = (t, s = 1.5) => { const k = kick(t), f = frameNo(t); return `translate3d(${((hash(f) - 0.5) * 2 * s * k).toFixed(2)}px,${((hash(f + 7) - 0.5) * 2 * s * k).toFixed(2)}px,0)`; };
+/** 中景雨（清晰的细雨，景深 0.6） */
+function Rain({ t, n = 140, color = 'rgba(200,215,235,.33)' }) {
+  const items = [];
+  for (let i = 0; i < n; i++) {
+    const r1 = hash(i * 3.1), r2 = hash(i * 7.7 + 1), r3 = hash(i * 1.9 + 5);
+    const y = ((r1 + t * (1.4 + r2)) % 1.2) - 0.1, x = (((r3 - t * 0.05) % 1) + 1) % 1;
+    items.push(<line key={i} x1={x * W} y1={y * H} x2={x * W - 6} y2={y * H + 30 + r2 * 30} stroke={color} strokeWidth={1 + r2} />);
+  }
+  return <L d={0.6}><svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>{items}</svg></L>;
+}
+
+/* ============================================================
+ * 4. 场景（a = 镜头开始，lt = t − a；词的时间一律用 WT/WE 从音频取）
+ * ============================================================ */
+const S = {};
+
+/* ---------- 前奏 ---------- */
+S.boot = ({ t, lt, len }) => {
+  const lines = [[0.6, '> init session  --mode=rival', C.dim], [1.5, '> node A  CODEX      @thsottiaux', C.cyan], [2.4, '> node B  GROK BOT   @poteto', C.pink], [3.3, '> handshake ......', C.dim], [4.4, '  ✕ timeout (peer is "busy roasting you")', C.red], [5.1, '> retry .....', C.dim]];
+  const try1 = lt < 4.4 ? hitE((lt - 3.3) / 1.4) : 1 - outExpo(prog(lt, 4.4, 4.7));
+  const try2 = hitE((lt - 5.2) / Math.max(0.3, len - 5.2));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} op={0.12 + prog(lt, 0, 5) * 0.1} />
+      <L d={0.55}>
+        <Abs style={{ left: 160, top: 210 }}>
+          {lines.map(([at, s, c], i) => lt > at && <Mono key={i} size={30} color={c} ls=".04em" style={{ lineHeight: 1.9 }}>{s.slice(0, Math.floor((lt - at) * 44))}{lt - at < s.length / 44 + 0.25 && <span style={{ background: c }}> </span>}</Mono>)}
+        </Abs>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          <circle cx={360} cy={760} r={22} fill="none" stroke={C.cyan} strokeWidth={3} opacity={prog(lt, 1.5, 1.7)} />
+          <circle cx={1560} cy={760} r={22} fill="none" stroke={C.pink} strokeWidth={3} opacity={prog(lt, 2.4, 2.6)} />
+          <line x1={382} y1={760} x2={382 + 1156 * Math.max(try1 * 0.62, try2)} y2={760} stroke={try2 > 0.98 ? C.bone : C.dim} strokeWidth={3} strokeDasharray={try2 > 0.98 ? '0' : '14 12'} />
+        </svg>
+        <Abs style={{ left: 300, top: 800 }}><Mono size={22} color={C.cyan}>CODEX</Mono></Abs>
+        <Abs style={{ left: 1490, top: 800 }}><Mono size={22} color={C.pink}>GROK BOT</Mono></Abs>
+      </L>
+      <FG kind="code" t={t} n={6} color={C.cyan} />
+      <Abs style={{ left: 0, right: 0, bottom: 70, textAlign: 'center', opacity: prog(lt, 0.3, 1) * (1 - prog(lt, len - 0.8, len - 0.2)) }}><Mono size={26} color="rgba(236,230,218,.62)" ls=".15em">非官方虚构同人作品 · 角色与剧情均为虚构</Mono></Abs>
+    </Full>
+  );
+};
+S.connect = ({ t, lt, a }) => {
+  const r = hitE(lt / 1.8) * 1300;
+  const packets = Array.from({ length: 10 }, (_, i) => { const p = ((lt * 0.9 + i / 10) % 1); return i % 2 ? 382 + 1156 * p : 1538 - 1156 * p; });
+  const bp = beatPulse(t);
+  return (
+    <Full style={{ background: C.ink }}>
+      <Full style={{ clipPath: `circle(${r.toFixed(2)}px at 960px 760px)` }}><Bg src={A('bg/rain_night.jpg')} blur={3} bright={0.5} /><Rain t={t} n={90} /></Full>
+      <L d={0.55}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          <line x1={382} y1={760} x2={1538} y2={760} stroke={C.bone} strokeWidth={3} />
+          {packets.map((x, i) => <circle key={i} cx={x} cy={760} r={6 + bp * 6} fill={i % 2 ? C.cyan : C.pink} />)}
+          <circle cx={360} cy={760} r={22 + bp * 8} fill={C.cyan} /><circle cx={1560} cy={760} r={22 + bp * 8} fill={C.pink} />
+        </svg>
+        <Center style={{ top: -120 }}>
+          <Decode text="CONNECTED" t={t} at={a + 0.05} size={180} font={DISPLAY} italic weight={700} ls={0.16} step={0.075} scramble={0.3} />
+          <Mono size={26} color={C.dim} style={{ marginTop: 20, opacity: prog(lt, 1.3, 1.6) }}>RIVAL SESSION · SAN FRANCISCO</Mono>
+        </Center>
+      </L>
+      <FG kind="rain" t={t} n={18} />
+    </Full>
+  );
+};
+const NameCard = ({ t, lt, name, en, sub, ink, cut, side, bg }) => {
+  const Lf = side === 'left';
+  return (
+    <Full>
+      <Bg src={bg} blur={7} bright={0.38} tint={`linear-gradient(${Lf ? 90 : 270}deg, ${ink}33, transparent 60%)`} />
+      <L d={0.5}>
+        <Abs style={{ left: Lf ? 60 : undefined, right: Lf ? undefined : 60, top: 120, opacity: 0.9 }}>
+          <Chars text={en} lt={lt} mode="spread" size={en.length > 4 ? 330 : 430} font={DISPLAY} weight={700} italic outline={3} color={ink} ls={0.02} stagger={0.04} dur={1.4} />
+        </Abs>
+      </L>
+      <Cut name={cut} lt={lt} x={Lf ? 1180 : 740} h={1060} from={Lf ? 420 : -420} rim={ink} light={ink} lightDir={Lf ? 270 : 90} dur={1.2} />
+      <L d={0.7}>
+        <Abs style={{ left: Lf ? 120 : undefined, right: Lf ? undefined : 120, bottom: 230, textAlign: Lf ? 'left' : 'right' }}>
+          <Mono size={24} color={ink} style={{ opacity: prog(lt, 0.3, 0.45) }}>{sub[0]}</Mono>
+          <Chars text={name} lt={lt - 0.35} mode="rise" size={110} align={Lf ? 'left' : 'right'} stagger={0.05} />
+          <div style={{ fontFamily: SERIF, fontSize: 34, color: C.bone, opacity: prog(lt, 0.9, 1.1), marginTop: 6 }}>{sub[1]}</div>
+        </Abs>
+      </L>
+      <FG kind="bokeh" t={t} color={ink} n={10} />
+    </Full>
+  );
+};
+S.tibo = (p) => <NameCard {...p} name="Tibo" en="TIBO" sub={['@thsottiaux · CODEX', '每天发一条推：Ship，或者 Reset']} ink={C.cyan} cut="tibo_default" side="left" bg={A('bg/office.jpg')} />;
+S.lauren = (p) => <NameCard {...p} name="Lauren" en="LAUREN" sub={['@poteto · GROK BOT', '嘴最毒的那个黑客']} ink={C.pink} cut="lauren_tsun" side="right" bg={A('bg/lauren_studio.jpg')} />;
+S.title = ({ t, lt, a }) => {
+  const hit = K(22.16) - a;                                    // SHIP 与 RESET 相撞 = 强底鼓
+  const k1 = inExpo(prog(lt, 0.1, hit)), shatter = prog(lt, hit, hit + 0.45);
+  const re = lt > hit + 0.25;
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} color={C.pink} op={0.14} />
+      <Cut name="tibo_fire" lt={lt} x={330} h={900} from={-320} rim={C.cyan} light={C.cyan} lightDir={270} op={0.9} />
+      <Cut name="lauren_smile" lt={lt} x={1590} h={900} from={320} rim={C.pink} light={C.pink} op={0.9} />
+      <L d={0.6}>
+        {!re && <Center style={{ transform: `translate3d(${lerp(-1000, -230, k1).toFixed(2)}px,0,0) rotate(${(shatter * -24).toFixed(2)}deg)`, opacity: 1 - shatter }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 260, color: C.cyan }}>SHIP</div></Center>}
+        {!re && <Center style={{ transform: `translate3d(${lerp(1000, 260, k1).toFixed(2)}px,0,0) rotate(${(shatter * 24).toFixed(2)}deg)`, opacity: 1 - shatter }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 260, color: C.red }}>RESET</div></Center>}
+        {re && (
+          <Center style={{ top: -40 }}>
+            <Chars text="相恋" lt={lt - hit - 0.25} mode="scatter" size={300} ls={0.2} stagger={0.1} dur={1.4} shadow="0 0 60px rgba(242,166,198,.45)" />
+            <div style={{ height: 24 }} />
+            <Decode text="～ 直到 TOKENS 耗尽 ～" t={t} at={a + hit + 0.9} size={62} font={SERIF} weight={700} ls={0.18} step={0.07} />
+          </Center>
+        )}
+      </L>
+      {lt > hit && lt < hit + 0.3 && <Full style={{ background: `radial-gradient(circle, rgba(242,166,198,${(0.5 * (1 - prog(lt, hit, hit + 0.3))).toFixed(3)}), transparent 60%)` }} />}
+      <FG kind="bokeh" t={t} n={12} />
+    </Full>
+  );
+};
+
+/* ---------- 主歌一 ---------- */
+S.twoAM = ({ t, lt, a }) => {
+  const flipAt = WT(0, '两点') - a;
+  const m = lt < flipAt ? '01:59' : '02:00';
+  return (
+    <Full style={{ background: C.ink }}>
+      <Full style={{ clipPath: 'polygon(0 0, 56% 0, 44% 100%, 0 100%)' }}><Bg src={A('bg/office.jpg')} bright={0.42} tint="linear-gradient(90deg, rgba(143,224,210,.18), transparent)" /><Cut name="tibo_tired" lt={lt} x={470} h={980} from={-220} rim={C.cyan} light={C.cyan} lightDir={0} /></Full>
+      <Full style={{ clipPath: 'polygon(56% 0, 100% 0, 100% 100%, 44% 100%)' }}><Bg src={A('bg/lauren_studio.jpg')} bright={0.42} tint="linear-gradient(270deg, rgba(242,166,198,.2), transparent)" /><Cut name="lauren_default" lt={lt} x={1450} h={980} from={220} rim={C.pink} light={C.pink} lightDir={0} /></Full>
+      <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}><line x1={W * 0.56} y1={0} x2={W * 0.44} y2={H} stroke={C.bone} strokeWidth={2} opacity={0.6} /></svg>
+      <L d={0.65}>
+        <Center style={{ top: -330 }}>
+          <div style={{ display: 'flex', gap: 18 }}>
+            {[...m].map((d, i) => <div key={i} style={{ width: d === ':' ? 40 : 130, height: 170, background: d === ':' ? 'transparent' : 'rgba(5,5,8,.85)', border: d === ':' ? 'none' : '1px solid rgba(236,230,218,.25)', display: 'flex', alignItems: 'center', justifyContent: 'center', fontFamily: MONO, fontSize: 130, color: C.bone, transform: i > 2 && lt > flipAt ? `perspective(500px) rotateX(${((1 - hitE((lt - flipAt) / 0.6)) * 90).toFixed(2)}deg)` : 'none' }}>{d}</div>)}
+          </div>
+        </Center>
+      </L>
+      <FG kind="code" t={t} n={7} />
+    </Full>
+  );
+};
+S.resetTweet = ({ t, lt, a }) => {
+  const hitR = WT(1, '重置') - a;
+  return (
+    <Full style={{ background: '#0a0608' }}>
+      <L d={0.3}><Center style={{ opacity: 0.22 }}><Glitch t={t} amt={0.25 + kick(t) * 1.2}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 520, color: C.red }}>RESET</div></Glitch></Center></L>
+      <L d={0.6}><Abs style={{ left: 120, top: 260 }}><Tweet who="tibo" name="Tibo 🚢" handle="@thsottiaux" meta="Day 2" text="Day 2 / It's a reset." k={lt} w={860} size={54} /></Abs></L>
+      <Cut name="lauren_cold" lt={lt - 0.5} x={1500} h={1000} from={340} rim={C.pink} light={C.red} />
+      <L d={1.0}><Abs style={{ left: 1080, top: 220 }}><Bubble who="lauren" text="又重置？？" k={lt - hitR} size={50} /></Abs></L>
+      <FG kind="bokeh" t={t} color={C.red} n={8} />
+    </Full>
+  );
+};
+S.burger = ({ t, lt, a }) => {
+  const kq = WT(2, '空气') - a, kb = WT(2, '汉堡') - a, kj = WT(2, '倔强') - a;
+  const top = clamp(sprE(lt - kq + 0.25), 0, 1.1), bot = clamp(sprE(lt - kq + 0.1), 0, 1.1);
+  const sq = lt > kb ? lerp(1, 0.7, hitE((lt - kb) / 0.5)) : 1;
+  return (
+    <Full style={{ background: 'radial-gradient(circle at 50% 45%, #3a1e2a, #0b0609 70%)' }}>
+      <Grid t={t} color={C.potato} op={0.1} />
+      <L d={0.6}>
+        <Center style={{ top: -60 }}>
+          <div style={{ width: 760, height: 150, borderRadius: '380px 380px 40px 40px', background: 'linear-gradient(#e0a05a, #b56e2e)', transform: `translate3d(0,${((1 - top) * -620 + (1 - sq) * 80).toFixed(2)}px,0)`, boxShadow: '0 20px 40px #000' }} />
+          <div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 210, color: C.bone, letterSpacing: '.4em', paddingLeft: '.4em', transform: `scaleY(${sq.toFixed(4)})`, opacity: clamp((lt - kq) * 8), textShadow: '0 0 30px rgba(255,255,255,.2)' }}>空 气</div>
+          <div style={{ width: 760, height: 90, borderRadius: '30px 30px 200px 200px', background: 'linear-gradient(#c27a36, #8f5420)', transform: `translate3d(0,${((1 - bot) * 620).toFixed(2)}px,0)` }} />
+        </Center>
+      </L>
+      <L d={0.9}>
+        {/* 「倔强」印章：黑体 700 + 大字号，避免粗宋体下与「偏」形近 */}
+        <Abs style={{ right: 140, top: 150, transform: `rotate(-8deg) scale(${lerp(2.6, 1, clamp(sprE(lt - kj), 0, 1.12)).toFixed(4)})`, opacity: clamp((lt - kj) * 30) }}>
+          <div style={{ fontFamily: SANS, fontWeight: 700, fontSize: 150, letterSpacing: '.08em', color: C.hot, border: `7px solid ${C.hot}`, padding: '4px 30px', textShadow: '0 0 24px rgba(255,95,162,.5)' }}>倔强</div>
+        </Abs>
+        <Abs style={{ left: 150, top: 200 }}><Bubble who="lauren" text="就这？空气汉堡 🍔" k={lt - kb} size={40} /></Abs>
+      </L>
+      <FG kind="bokeh" t={t} color={C.potato} n={10} />
+    </Full>
+  );
+};
+S.online = ({ t, lt, a }) => {
+  const onAt = WT(3, '上线') - a;
+  const on = lt >= onAt;
+  return (
+    <Full style={{ background: 'linear-gradient(160deg, #120a18, #06060a)' }}>
+      <Bg src={A('bg/lauren_studio.jpg')} blur={10} bright={0.3} />
+      <Cut name="lauren_blush" lt={lt} x={480} h={1050} from={-240} rim={C.pink} light={C.green} lightDir={270} />
+      <L d={0.55}>
+        <Abs style={{ left: 980, top: 150, width: 760, height: 700, background: 'rgba(14,12,20,.92)', border: '1px solid rgba(236,230,218,.15)', borderRadius: 36, padding: 40, boxSizing: 'border-box', transform: `translate3d(0,${((1 - hitE(lt / 0.9)) * 160).toFixed(2)}px,0)` }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 22 }}>
+            <div style={{ position: 'relative', width: 96, height: 96, borderRadius: 48, overflow: 'hidden' }}><Img src={A('avatar/tibo.webp')} /></div>
+            <div>
+              <div style={{ fontFamily: SANS, fontWeight: 700, fontSize: 40, color: C.bone }}>Tibo 🚢</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginTop: 6 }}><div style={{ width: 18, height: 18, borderRadius: 9, background: on ? C.green : '#555', boxShadow: on ? `0 0 ${(10 + beatPulse(t) * 20).toFixed(1)}px ${C.green}` : 'none' }} /><Mono size={24} color={on ? C.green : C.dim} ls=".05em">{on ? '在线' : '离线 · 上次在线 3 小时前'}</Mono></div>
+            </div>
+          </div>
+          <div style={{ marginTop: 60, display: 'flex', flexDirection: 'column', gap: 24 }}>
+            <Bubble who="lauren" side="right" text="你今天发什么？" k={lt - (WT(3, '嫌弃') - a)} size={36} />
+            <Bubble who="lauren" side="right" text="……喂？" k={lt - (WT(3, '却在') - a)} size={36} />
+            {!on && lt > WT(3, '等你') - a && <div style={{ display: 'flex', gap: 10, padding: '20px 26px' }}>{[0, 1, 2].map((i) => <div key={i} style={{ width: 16, height: 16, borderRadius: 8, background: C.cyan, opacity: 0.3 + 0.7 * (Math.floor(lt * 5) % 3 === i ? 1 : 0) }} />)}</div>}
+            {on && <Bubble who="tibo" text="早。今天 Ship。" k={lt - onAt - 0.15} size={36} />}
+          </div>
+        </Abs>
+      </L>
+      {on && <L d={0.8}><Abs style={{ left: 1040, top: 30 }}><Chars text="ONLINE" lt={lt - onAt} mode="spread" size={90} font={DISPLAY} italic color={C.green} ls={0.3} dur={1.2} /></Abs></L>}
+      <FG kind="bokeh" t={t} color={C.green} n={10} />
+    </Full>
+  );
+};
+S.countdown = ({ t, lt }) => {
+  // 「倒数二十八天」：人声一起就是 28，唱完「天」之后每拍往下翻一页
+  const day = WE(4, '天') - LEAD;
+  const n = t < day ? 28 : Math.max(20, 28 - beatsSince(t, day));
+  const kFlip = t < day ? hitE(lt / 0.5) : hitE((t - Math.max(day, lastBeatT(t))) / 0.35);
+  const fill = prog(t, WT(4, '押上'), LE(4));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('bg/server_room.jpg')} bright={0.28} blur={6} />
+      <L d={0.55}>
+        <Center style={{ top: -80 }}>
+          <Mono size={30} color={C.dim}>DAYS LEFT</Mono>
+          <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 420, color: n === 28 ? C.pink : C.bone, lineHeight: 1, transform: `perspective(800px) rotateX(${((1 - kFlip) * 75).toFixed(2)}deg)`, transformOrigin: 'center top' }}>{String(n).padStart(2, '0')}</div>
+          <div style={{ display: 'flex', gap: 10, marginTop: 30, transform: jit(t) }}>{Array.from({ length: 16 }, (_, i) => <div key={i} style={{ width: 34, height: 90, background: i / 16 < fill ? (i > 12 ? C.red : C.cyan) : 'rgba(236,230,218,.1)' }} />)}</div>
+          <Mono size={34} color={C.cyan} style={{ marginTop: 22, opacity: clamp((t - WT(4, '押上')) * 8) }}>GPU · ALL IN</Mono>
+        </Center>
+      </L>
+      <FG kind="code" t={t} n={8} color={C.red} />
+    </Full>
+  );
+};
+S.buttons = ({ t, a }) => {
+  const pressAt = WT(5, '一天');
+  const pressed = t >= pressAt;
+  const sel = (beatsSince(t, a) + 1) % 2;
+  const Btn = ({ label, ink, on }) => <div style={{ width: 620, height: 260, display: 'flex', alignItems: 'center', justifyContent: 'center', border: `4px solid ${ink}`, background: on ? ink : 'transparent', color: on ? '#0b0a0e' : ink, fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 150, transform: `scale(${on ? (1.04 + beatPulse(t, 9) * 0.05).toFixed(4) : 0.96})` }}>{label}</div>;
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} op={0.18} />
+      <L d={0.55}>
+        <Center style={{ top: -60 }}>
+          <Mono size={28} color={C.dim}>09:00 · TODAY'S TWEET</Mono>
+          <div style={{ display: 'flex', gap: 80, marginTop: 40 }}><Btn label="SHIP" ink={C.cyan} on={pressed || sel === 0} /><Btn label="RESET" ink={C.red} on={!pressed && sel === 1} /></div>
+        </Center>
+      </L>
+      {pressed && <L d={0.85}><Center style={{ top: 300 }}><div style={{ transform: `rotate(-6deg) scale(${lerp(2.2, 1, clamp(sprE(t - pressAt), 0, 1.1)).toFixed(4)})` }}><div style={{ fontFamily: SANS, fontWeight: 700, fontSize: 70, color: C.cyan, border: `5px solid ${C.cyan}`, padding: '4px 24px' }}>一天只能选一次</div></div></Center></L>}
+      <FG kind="bokeh" t={t} color={C.cyan} n={8} />
+    </Full>
+  );
+};
+S.server = ({ t, lt, a }) => {
+  const pts = [];
+  for (let x = 0; x <= W; x += 8) { const tt = t - (W - x) / 800; const f = tt - lastBeatT(tt); const y = f < 0.06 ? -Math.sin(f / 0.06 * Math.PI) * 220 : f < 0.1 ? Math.sin((f - 0.06) / 0.04 * Math.PI) * 70 : 0; pts.push(`${x},${(560 + y).toFixed(1)}`); }
+  const hb = WT(6, '心跳') - a;
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('bg/server_room.jpg')} bright={0.48} blur={3} tint={`rgba(255,40,30,${(0.22 + kick(t) * 0.18).toFixed(3)})`} />
+      <L d={0.55}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}><polyline points={pts.join(' ')} fill="none" stroke={C.hot} strokeWidth={6} style={{ filter: `drop-shadow(0 0 12px ${C.hot})` }} /></svg>
+        <Abs style={{ left: 120, top: 150, transform: jit(t, 2) }}><Mono size={30} color="#ffb3a8">RACK #3 · H200</Mono><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 220, color: C.red, lineHeight: 1 }}>{Math.round(lerp(88, 109, hitE(lt / 1.6)))}°C</div><Mono size={26} color="#ffb3a8" style={{ opacity: clamp((t - WT(6, '冒烟')) * 6) }}>SMOKE DETECTED</Mono></Abs>
+        <Abs style={{ right: 120, top: 150, textAlign: 'right', opacity: clamp((lt - hb) * 10) }}><Mono size={30} color={C.pink}>HEART RATE</Mono><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 220, color: C.pink, lineHeight: 1, transform: `scale(${(1 + beatPulse(t, 9) * 0.07).toFixed(4)})`, transformOrigin: 'right' }}>130</div><Mono size={26} color={C.pink}>BPM · 超频</Mono></Abs>
+      </L>
+      <FG kind="code" t={t} n={8} color={C.red} />
+    </Full>
+  );
+};
+S.limit = ({ t, lt, a }) => {
+  const lim = WT(7, '限流') - a, sent = WT(7, '回你') - a;
+  const q = lt > lim ? 1 - hitE((lt - lim) / 0.8) : 1;
+  return (
+    <Full style={{ background: 'linear-gradient(180deg, #160808, #06060a)' }}>
+      <Bg src={A('bg/office.jpg')} bright={0.22} blur={9} tint="rgba(255,60,40,.08)" />
+      <Cut name="tibo_gag" lt={lt} x={560} h={1050} from={-240} rim={C.red} light={C.red} lightDir={270} />
+      <L d={0.55}>
+        <Abs style={{ left: 1000, top: 210, width: 780, transform: jit(t) }}>
+          <Mono size={28} color={C.red}>QUOTA · 今日聊天额度</Mono>
+          <div style={{ height: 40, border: `2px solid ${C.red}`, marginTop: 14 }}><div style={{ height: '100%', width: `${(q * 100).toFixed(2)}%`, background: C.red }} /></div>
+          <Mono size={26} color={C.red} style={{ marginTop: 10 }}>{Math.round(q * 100)}%  {q < 0.02 ? 'RATE LIMITED' : ''}</Mono>
+          <div style={{ marginTop: 70 }}>{lt > sent && <Bubble who="tibo" side="right" text="收到。今晚也回你。💗" k={lt - sent} size={40} w={700} />}</div>
+          {lt > sent + 0.4 && <Mono size={26} color={C.green} style={{ textAlign: 'right', marginTop: 12 }}>已送达 ✓✓</Mono>}
+        </Abs>
+      </L>
+      <FG kind="bokeh" t={t} color={C.red} n={8} />
+    </Full>
+  );
+};
+
+/* ---------- 导歌 ---------- */
+S.shipReset = ({ t, lt, a }) => {
+  // 前两拍跟着唱词（Ship / reset），之后每拍互换；「别问我答案」逐字跟唱
+  const ts = WT(8, 'ship'), tr = WT(8, 'reset');
+  const n = beatsSince(t, tr + 0.05);
+  const word = t < tr ? 'SHIP' : n % 2 ? 'SHIP' : 'RESET';
+  const at = t < tr ? ts : n === 0 ? tr : lastBeatT(t);
+  const ink = word === 'RESET' ? C.red : C.cyan;
+  const pos = [[0, 0], [-360, -150], [340, 130], [-280, 190], [330, -180]][(n + (t < tr ? 0 : 1)) % 5];
+  const e = clamp(sprE(t - at), 0, 1.15);
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} color={ink} op={0.16} />
+      <L d={0.6}>
+        <Center style={{ transform: `translate3d(${(pos[0] * 0.6).toFixed(1)}px,${(pos[1] * 0.6).toFixed(1)}px,0) scale(${lerp(1.6, 1, e).toFixed(4)})` }}>
+          <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 400, color: ink, textShadow: `0 0 50px ${ink}55` }}>{word}</div>
+        </Center>
+      </L>
+      <L d={0.9}><Center style={{ top: 520 }}><Chars text="别问我答案" lt={lt} times={tokTimes(8, '别问', '答案', a)} mode="rise" size={72} weight={700} ls={0.3} dur={0.6} shadow="0 4px 20px #000" /></Center></L>
+      <Abs style={{ left: 80, top: 80 }}><Mono size={22} color={C.dim}>{`> decide --today  [${word.toLowerCase()}]`}</Mono></Abs>
+      <FG kind="code" t={t} n={7} color={ink} />
+    </Full>
+  );
+};
+S.days = ({ t, lt, a }) => {
+  const last = WT(9, '最后') - a;
+  const d = lt >= last ? 28 : Math.min(27, 1 + Math.floor(hitE(lt / last) * 26));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} color={C.pink} op={0.14} />
+      <L d={0.45}>
+        <Abs style={{ left: 0, right: 0, top: 230, display: 'flex', justifyContent: 'center', gap: 10, transform: `translate3d(${((14.5 - d) * 102).toFixed(1)}px,0,0)` }}>
+          {Array.from({ length: 28 }, (_, i) => <div key={i} style={{ width: 92, height: 120, flexShrink: 0, border: `1px solid ${i + 1 === d ? C.pink : 'rgba(236,230,218,.2)'}`, background: i + 1 < d ? 'rgba(236,230,218,.08)' : i + 1 === d ? C.pink : 'transparent', color: i + 1 === d ? '#0b0a0e' : C.dim, fontFamily: MONO, fontSize: 40, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{String(i + 1).padStart(2, '0')}</div>)}
+        </Abs>
+      </L>
+      <L d={0.75}>
+        <Center style={{ top: 140 }}>
+          {d >= 28 ? <Chars text="最后一天" lt={lt - last} mode="slam" size={220} color={C.pink} ls={0.1} stagger={0.07} /> : <div style={{ fontFamily: MONO, fontSize: 160, color: C.bone }}>DAY {String(d).padStart(2, '0')}</div>}
+          <Mono size={28} color={C.dim} style={{ marginTop: 18 }}>EVERY DAY IS THE LAST DAY</Mono>
+        </Center>
+      </L>
+    </Full>
+  );
+};
+S.tunnel = ({ t, lt, len }) => {
+  const z = lt * 1500 * (1 + lt * 0.7) * (1 + rms(t) * 0.3);
+  return (
+    <Full style={{ background: C.ink, perspective: 900, overflow: 'hidden' }}>
+      {Array.from({ length: 14 }, (_, i) => {
+        const zz = -((i * 520 - z) % (14 * 520) + 14 * 520) % (14 * 520);
+        return (
+          <div key={i} style={{ position: 'absolute', left: '50%', top: '50%', transform: `translate(-50%,-50%) translateZ(${(zz + 400).toFixed(1)}px) rotateZ(${(i * 13 + lt * 24).toFixed(2)}deg)`, opacity: clamp((zz + 7000) / 6000) }}>
+            <div style={{ width: 1300, height: 1300, borderRadius: '50%', border: `2px solid ${i % 2 ? C.pink : C.cyan}55`, display: 'flex', alignItems: 'flex-start', justifyContent: 'center' }}>
+              <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 90, color: i % 2 ? C.pink : C.cyan, marginTop: -60, letterSpacing: '.3em' }}>TOKENS · 相恋 · TOKENS</div>
+            </div>
+          </div>
+        );
+      })}
+      <Full style={{ background: `radial-gradient(circle, rgba(242,166,198,${(0.65 * inExpo(prog(lt, len - 0.6, len))).toFixed(3)}), transparent ${lerp(10, 85, prog(lt, len - 0.6, len)).toFixed(1)}%)` }} />
+    </Full>
+  );
+};
+
+/* ---------- 副歌 ---------- */
+const chorusLock = (i) => AF.lines[i].tok.slice(wordPos(i, '直到')[0]).map((x) => x[0] - LEAD);
+S.chorusTitle = ({ t, lt }) => {
+  const tt = chorusLock(10);   // 「直到 TOKENS 耗尽」逐字（英文逐字母）锁定在唱到的那一刻
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('cg/day07_memory.jpg')} blur={12} bright={0.45} />
+      <L d={0.5}><Center style={{ top: -180 }}><Stroke text="相恋" lt={lt} size={520} w={1800} h={560} color={C.pink} dur={1.1} fillAt={0.75} sw={4} /></Center></L>
+      <Cut name="day07_memory" x={960} h={1080} ar={16 / 9} light={C.pink} lightDir={180} />
+      <L d={1.05}><Abs style={{ left: 0, right: 0, top: 60, display: 'flex', justifyContent: 'center' }}><Decode text="直到 TOKENS 耗尽" t={t} at={tt[0] - 0.35} times={tt} size={78} font={SERIF} weight={700} ls={0.28} /></Abs></L>
+      <FG kind="bokeh" t={t} n={14} />
+    </Full>
+  );
+};
+S.quota = ({ t, lt, a }) => {
+  const you = WT(11, '切给你') - a;
+  const nodes = Array.from({ length: 14 }, (_, i) => [180 + (i % 2) * 120, 160 + i * 52]);
+  return (
+    <Full style={{ background: '#08060c' }}>
+      <Bg src={A('cg/day08_vip.jpg')} bright={0.28} blur={8} />
+      <L d={0.5}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          {nodes.map(([x, y], i) => {
+            const p = ((lt * 0.9 + i * 0.07) % 1), d = `M${x},${y} C${x + 600},${y} 1100,540 1520,540`;
+            const bx = (1 - p) ** 3 * x + 3 * (1 - p) ** 2 * p * (x + 600) + 3 * (1 - p) * p * p * 1100 + p ** 3 * 1520;
+            const by = (1 - p) ** 3 * y + 3 * (1 - p) ** 2 * p * y + 3 * (1 - p) * p * p * 540 + p ** 3 * 540;
+            return <g key={i}><path d={d} fill="none" stroke="rgba(143,224,210,.25)" strokeWidth={2} /><circle cx={x} cy={y} r={9} fill={C.cyan} /><circle cx={bx} cy={by} r={9} fill={C.pink} /></g>;
+          })}
+          <circle cx={1560} cy={540} r={90 + kick(t) * 26} fill="none" stroke={C.pink} strokeWidth={4} />
+        </svg>
+        <Abs style={{ left: 1470, top: 450, width: 180, height: 180, borderRadius: 90, overflow: 'hidden' }}><Img src={A('avatar/lauren.webp')} /></Abs>
+      </L>
+      <L d={0.85}><Abs style={{ left: 1000, top: 660, width: 820, textAlign: 'center' }}><Mono size={30} color={C.pink}>@poteto</Mono><Chars text="ALL QUOTA → YOU" lt={lt - you} mode="spread" size={52} font={DISPLAY} italic color={C.bone} ls={0.12} dur={1.1} /></Abs></L>
+      <FG kind="code" t={t} n={8} color={C.pink} />
+    </Full>
+  );
+};
+S.loop = ({ t, lt }) => {
+  const k1 = WT(12, '一千'), k2 = WT(12, '一万');
+  const n = t < k1 ? 1 : t < k2 ? lerp(1, 1000, hitE((t - k1) / 0.5)) : lerp(1000, 10000, hitE((t - k2) / 0.6));
+  return (
+    <Full style={{ background: '#0a0612' }}>
+      <Grid t={t} color={C.violet} op={0.16} />
+      <L d={0.45}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          {[260, 340, 420].map((r, i) => <circle key={i} cx={960} cy={500} r={r + kick(t) * 14} fill="none" stroke={i === 1 ? C.violet : 'rgba(201,166,255,.35)'} strokeWidth={i === 1 ? 4 : 2} strokeDasharray="30 18" transform={`rotate(${(lt * (i % 2 ? -90 : 120)).toFixed(2)} 960 500)`} />)}
+        </svg>
+      </L>
+      <L d={0.8}><Abs style={{ left: 960 - 150, top: 290, width: 300, height: 420, transform: `perspective(900px) rotateY(${(lt * 200).toFixed(2)}deg)`, boxShadow: `0 0 ${(80 + kick(t) * 60).toFixed(1)}px ${C.violet}66` }}><Img src={A('ui/reset_card.webp')} /></Abs></L>
+      <L d={0.6}><Abs style={{ left: 0, right: 0, top: 760, textAlign: 'center' }}><div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 120, color: C.violet, transform: jit(t, 2) }}>×{fmtN(n)}</div><Mono size={28} color={C.dim}>LOOP · 重来一千一万遍</Mono></Abs></L>
+      <FG kind="bokeh" t={t} color={C.violet} n={10} />
+    </Full>
+  );
+};
+S.rainYou = ({ t, lt, a }) => {
+  const ky = WT(13, '选你') - a;
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('bg/street_rain.jpg')} bright={0.45} blur={5} />
+      <Rain t={t} n={150} />
+      <L d={0.62}><Abs style={{ right: 210, top: 110, writingMode: 'vertical-rl' }}><Chars text="选你" lt={lt} times={tokTimes(13, '选你', null, a)} mode="drop" size={330} color={C.pink} shadow={`0 0 40px ${C.pink}66`} /></Abs></L>
+      {/* 近景：人物放大裁到胸口、偏左构图 */}
+      <Cut name="lauren_sad" lt={lt} x={700} h={1500} y={1500} from={-160} rim={C.pink} light="#9ec8ff" lightDir={0} />
+      <L d={0.62}><Abs style={{ right: 120, top: 140, writingMode: 'vertical-rl', opacity: clamp((lt - ky) * 5) }}><Mono size={30} color={C.bone} ls=".5em">CHOOSE YOU · IN THE RAIN</Mono></Abs></L>
+      <FG kind="rain" t={t} />
+    </Full>
+  );
+};
+S.rewind = ({ t, lt, a }) => {
+  const zero = WT(14, '归零') - a;
+  const p = lt < zero ? 1 - 0.85 * inOut(lt / zero) : 0.15 * (1 - hitE((lt - zero) / 0.4));
+  const r1 = WT(14, 'reset', 0) - a, r2 = WT(14, 'reset', 1) - a;
+  const flick = Math.exp(-Math.max(0, lt - (lt > r2 ? r2 : r1)) / 0.12) * (lt >= r1 ? 1 : 0);
+  return (
+    <Full style={{ background: '#0b0814' }}>
+      <Grid t={-t} color={C.violet} op={0.14} />
+      <Full style={{ backgroundImage: 'repeating-linear-gradient(0deg, rgba(0,0,0,.35) 0 2px, transparent 2px 6px)', transform: `translate3d(0,${((lt * -300) % 6).toFixed(2)}px,0)` }} />
+      <L d={0.6}>
+        <Center style={{ top: -120 }}>
+          <Glitch t={t} amt={flick * 0.8}><div style={{ display: 'flex' }}>{[...'RESET'].map((c, i) => { const k = clamp((p - 0.15 * i) * 2); return <span key={i} style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 280, color: C.violet, display: 'inline-block', transform: `translate3d(${((1 - k) * (i - 2) * 160).toFixed(1)}px,${((1 - k) * (hash(i) - 0.5) * 400).toFixed(1)}px,0) scaleX(-1)`, opacity: 0.4 + k * 0.6 }}>{c}</span>; })}</div></Glitch>
+          <div style={{ width: 1100, height: 22, border: `2px solid ${C.violet}`, marginTop: 30, transform: jit(t) }}><div style={{ height: '100%', width: `${(p * 100).toFixed(2)}%`, background: C.violet }} /></div>
+          <Mono size={34} color={C.violet} style={{ marginTop: 16 }}>{`${Math.round(p * 100)}%  ⟲  把昨天归零`}</Mono>
+        </Center>
+      </L>
+      <FG kind="code" t={t} n={8} color={C.violet} />
+    </Full>
+  );
+};
+S.onlyYou = ({ t, lt, a, len }) => {
+  const ko = WT(15, 'only') - a;
+  const k = inOut(prog(lt, 0, len * 0.8));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('bg/seawall_night.jpg')} bright={0.48} blur={4} />
+      <L d={0.5}><Center style={{ top: -170 }}><Chars text="ONLY YOU" lt={lt - ko} mode="spread" size={300} font={DISPLAY} italic weight={700} color="rgba(236,230,218,.92)" ls={0.08} stagger={0.05} dur={1.4} /></Center></L>
+      <Cut name="tibo_gentle" lt={9} x={lerp(420, 700, k)} h={1000} rim={C.cyan} light={C.cyan} lightDir={270} />
+      <Cut name="lauren_smile" lt={9} x={lerp(1500, 1220, k)} h={1000} rim={C.pink} light={C.pink} lightDir={90} />
+      <L d={1.1}><Abs style={{ left: 0, right: 0, top: 640, textAlign: 'center' }}><Chars text="只有你能赢" lt={lt} times={tokTimes(15, '只有', null, a)} mode="rise" size={92} color={C.bone} ls={0.4} dur={0.7} shadow="0 4px 30px #000" /></Abs></L>
+      <FG kind="bokeh" t={t} n={14} />
+    </Full>
+  );
+};
+
+/* ---------- 吟唱 Drop：耗 / 耗尽 / TOKENS，严格踩鼓分轨的每个瞬态 ---------- */
+const TILES = ['bg/hackathon_hall.jpg', 'bg/livestream_room.jpg', 'bg/ramen_shop.jpg', 'bg/rooftop_night.jpg', 'bg/cafe.jpg', 'cg/day22_pixelpotato.jpg', 'bg/lauren_studio.jpg', 'bg/bay_sunset.jpg'];
+const CHANT = ['耗', '耗', '耗尽', 'TOKENS'];
+const FONTS3 = [SERIF, SANS, MONO];
+let STROBE = null;
+function strobeTimes(a, b) {   // 频闪只取强底鼓，两次间隔 ≥ 0.36 s（≤ 2.8 次/秒，低于 3 Hz 光敏安全线）
+  if (STROBE && STROBE.a === a) return STROBE.v;
+  const v = []; for (const [kt, s] of AF.kicks) if (kt - LEAD >= a && kt - LEAD <= b && s >= 0.55 && (!v.length || kt - LEAD - v[v.length - 1] >= 0.36)) v.push(kt - LEAD);
+  STROBE = { a, v }; return v;
+}
+S.chant = ({ t, lt, a, len }) => {
+  const on = lastOnset(t, 0.15, a + LEAD - 0.001);          // 每个鼓点瞬态
+  const kk = lastKick(t, 0.35, a + LEAD - 0.001);           // 每个底鼓
+  const ko = on.at == null ? 0 : Math.exp(-(t - on.at) / 0.07);
+  const kq = kk.at == null ? 0 : Math.exp(-(t - kk.at) / 0.1);
+  const word = CHANT[kk.n % 4];
+  const heavy = on.n % 2 === 0;
+  const pos = [[0, 0], [-420, -180], [400, 160], [-360, 200], [380, -200], [0, 120]][kk.n % 6];
+  let sk = 0; for (const s of strobeTimes(a, a + len)) if (t >= s && t < s + 0.12) sk = Math.max(sk, Math.exp(-(t - s) / 0.04));
+  const hot = on.n % 8;
+  const zoom = lerp(1, 1.35, inOut(prog(lt, len - 2.5, len)));
+  return (
+    <Full style={{ background: C.ink, overflow: 'hidden' }}>
+      <L d={0.25}>
+        <Full style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gridTemplateRows: 'repeat(2, 1fr)', gap: 10, padding: 10, transform: `scale(${(zoom * (1 + kq * 0.025)).toFixed(4)}) rotate(${((zoom - 1) * -6).toFixed(3)}deg)` }}>
+          {TILES.map((s, i) => <div key={i} style={{ position: 'relative', overflow: 'hidden', filter: i === hot ? `brightness(${(0.9 + ko * 0.5).toFixed(3)})` : 'brightness(.22) saturate(.5)' }}><Img src={A(s)} /></div>)}
+        </Full>
+      </L>
+      <L d={0.5}><PathText text="TOKENS · TOKENS · TOKENS · TOKENS · TOKENS · TOKENS · TOKENS · TOKENS · " t={lt * 1.2 + (on.n * 0.04)} d="M-200,560 C300,360 700,760 1100,560 S1700,360 2200,560" size={84} color={C.pink} speed={420} id="chantPath" /></L>
+      <L d={0.8}>
+        <Center style={{ transform: `translate3d(${pos[0]}px,${pos[1]}px,0) scale(${lerp(1, 1.5, kq).toFixed(4)})` }}>
+          <Glitch t={t} amt={ko * 1.1} seed={on.n}>
+            <div style={{ fontFamily: word === 'TOKENS' ? DISPLAY : FONTS3[on.n % 3], fontStyle: word === 'TOKENS' ? 'italic' : 'normal', fontWeight: heavy ? 900 : 200, fontSize: word === 'TOKENS' ? 260 : word === '耗尽' ? 360 : 300, color: word === '耗尽' ? C.hot : C.bone, letterSpacing: word === 'TOKENS' ? '.08em' : 0, textShadow: `${(-10 * ko).toFixed(1)}px 0 rgba(0,240,255,.85), ${(10 * ko).toFixed(1)}px 0 rgba(255,40,190,.85), 0 0 40px rgba(0,0,0,.9)` }}>{word}</div>
+          </Glitch>
+        </Center>
+      </L>
+      {/* 横向切片：每个瞬态把画面切成错位条带 */}
+      {ko > 0.15 && [0, 1, 2, 3].map((j) => <Abs key={j} style={{ left: 0, right: 0, top: hash(on.n * 9 + j) * 1000, height: 8 + hash(on.n + j) * 40, background: j % 2 ? 'rgba(0,240,255,.18)' : 'rgba(255,40,190,.18)', transform: `translate3d(${((hash(on.n * 3 + j) - 0.5) * 300 * ko).toFixed(1)}px,0,0)`, mixBlendMode: 'screen' }} />)}
+      {sk > 0.01 && <Full style={{ background: `rgba(255,95,162,${(0.32 * sk).toFixed(3)})`, mixBlendMode: 'screen' }} />}
+      <FG kind="code" t={t} n={10} />
+    </Full>
+  );
+};
+S.onlyYou2 = ({ t, lt, a }) => (
+  <Full style={{ background: 'linear-gradient(180deg, #2a1220, #0a0610)' }}>
+    <Bg src={A('bg/bay_sunset.jpg')} bright={0.42} blur={5} />
+    <Cut name="lauren_laugh" lt={lt} x={960} h={1060} fromY={80} rim={C.pink} light="#ffb070" lightDir={0} />
+    <L d={0.6}><Abs style={{ left: 120, top: 200 }}><Chars text="Only" lt={lt - (WT(16, 'only') - a)} mode="rise" size={200} font={DISPLAY} italic color={C.bone} /></Abs></L>
+    <L d={0.6}><Abs style={{ right: 140, top: 200 }}><Chars text="you." lt={lt - (WT(16, 'you') - a)} mode="rise" size={200} font={DISPLAY} italic color={C.pink} /></Abs></L>
+    <FG kind="petal" t={t} n={18} />
+  </Full>
+);
+
+/* ---------- 主歌二 ---------- */
+S.latte = ({ t, lt, a }) => {
+  const k2 = WT(17, '两'), k3 = WT(17, '颗');
+  return (
+    <Full style={{ background: C.ink }}>
+      <Bg src={A('cg/day14_latte.jpg')} bright={0.68} blur={0} d={0.3} vig={0.55} />
+      <L d={0.55}>
+        {[k2, k3].map((at, i) => { const k = clamp(sprE(t - at, 9, 12), 0, 1.08); return <Abs key={i} style={{ left: 0, top: 0, width: 80, height: 80, background: '#f6f1e8', borderRadius: 12, boxShadow: '0 10px 30px rgba(0,0,0,.6)', transform: `translate3d(${880 + i * 70}px,${lerp(-200, 760, k).toFixed(1)}px,0) rotate(${((1 - clamp(k)) * 90 + i * 12).toFixed(2)}deg)`, opacity: clamp((t - at) * 20) * (1 - prog(t, at + 0.6, at + 0.8)) }} />; })}
+        <Abs style={{ left: 1420, top: 760, transform: 'rotate(-4deg)', background: C.bone, color: '#17140f', padding: '14px 24px', opacity: clamp((t - WT(17, '糖')) * 8) }}><div style={{ fontFamily: '"Segoe Print","Comic Sans MS",cursive', fontSize: 40 }}>Oat Latte · 2 Sugars</div></Abs>
+      </L>
+      <L d={0.8}><Abs style={{ left: 120, top: 120 }}><Chars text="两颗糖" lt={lt} times={tokTimes(17, '两颗糖', null, a)} mode="drop" size={150} color={C.bone} shadow="0 4px 30px #000" /></Abs></L>
+      <FG kind="bokeh" t={t} color="#ffcf8a" n={12} />
+    </Full>
+  );
+};
+S.log = ({ t, lt, a }) => {
+  const lines = ['就这？空气汉堡 🍔', '建议改名 Reset Company', '死鸭子嘴硬', '你的模型说土豆是水果？', '又限流？？', '笨蛋 Tibo'];
+  return (
+    <Full style={{ background: '#0b0a10' }}>
+      <Bg src={A('bg/office.jpg')} bright={0.22} blur={10} />
+      <Cut name="tibo_gentle" lt={lt} x={1520} h={1040} from={240} rim={C.cyan} light={C.pink} lightDir={90} />
+      <L d={0.55}>
+        <Abs style={{ left: 120, top: 150, width: 980 }}>
+          <Mono size={24} color={C.dim}>~/memory/poteto_roasts.log</Mono>
+          {lines.map((s, i) => { const at = beatsAt(a, i); const k = hitE((t - at) / 0.4), hi = prog(t, at + 0.1, at + 0.3); return (
+            <div key={i} style={{ display: 'flex', alignItems: 'center', gap: 20, marginTop: 18, opacity: clamp((t - at) * 12), transform: `translate3d(${((1 - k) * -80).toFixed(1)}px,0,0)` }}>
+              <Mono size={22} color={C.dim} ls="0">{String(i + 1).padStart(3, '0')}</Mono>
+              <div style={{ fontFamily: SANS, fontSize: 40, color: C.bone, background: `linear-gradient(90deg, rgba(242,166,198,.3) ${(hi * 100).toFixed(1)}%, transparent ${(hi * 100).toFixed(1)}%)`, padding: '2px 10px' }}>{s}</div>
+              <Mono size={24} color={C.green} style={{ opacity: hi }}>✓ 已记住</Mono>
+            </div>); })}
+        </Abs>
+      </L>
+      <FG kind="code" t={t} n={8} />
+    </Full>
+  );
+};
+S.gold = ({ t, lt, a }) => (
+  <Full style={{ background: '#0b0804' }}>
+    <Bg src={A('cg/day02_blackcard.jpg')} bright={0.38} sat={0.7} blur={6} tint="linear-gradient(90deg, rgba(0,0,0,.6), rgba(216,180,106,.15))" />
+    <L d={0.5}>
+      <Abs style={{ left: 100, top: 160 }}>
+        <Chars text="BLACK" lt={lt - (WT(19, '黑') - a)} mode="spread" size={230} font={DISPLAY} weight={700} color={C.bone} ls={0.12} />
+        <Chars text="& GOLD" lt={lt - (WT(19, '金') - a)} mode="spread" size={230} font={DISPLAY} italic weight={700} color={C.gold} ls={0.12} />
+      </Abs>
+    </L>
+    <Cut name="dario_cold" lt={lt - 0.15} x={1480} h={1050} from={340} rim={C.gold} light={C.gold} lightDir={270} />
+    <L d={1.0}><Abs style={{ left: 160, top: 760, width: 420, height: 240, borderRadius: 18, background: 'linear-gradient(135deg, #1a1408, #3a2c10 60%, #0a0804)', border: `2px solid ${C.gold}`, transform: `perspective(900px) rotateY(${lerp(-75, -15, hitE((t - WT(19, '车')) / 0.8)).toFixed(2)}deg)`, opacity: clamp((t - WT(19, '车')) * 8), boxShadow: `0 0 50px ${C.gold}44` }}><Mono size={22} color={C.gold} style={{ padding: 24 }}>BLACK CARD · OPUS</Mono></Abs></L>
+    <FG kind="bokeh" t={t} color={C.gold} n={12} />
+  </Full>
+);
+S.push = ({ t }) => {
+  const tp = WT(20, '推送'), tw = WT(20, '弹窗');
+  const notes = [['lauren', 'poteto 🥔', '就这？', tp - 0.45], ['dario', 'Dario', '车在楼下。', tp - 0.2], ['lauren', 'poteto 🥔', '今天又重置？', tp], ['lauren', 'poteto 🥔', '……早点睡。', tw]];
+  return (
+    <Full style={{ background: 'radial-gradient(circle at 50% 40%, #1c1424, #06060a 70%)' }}>
+      <Grid t={t} color={C.pink} op={0.1} />
+      <L d={0.55}>
+        <Abs style={{ left: 960 - 270, top: 70, width: 540, height: 1000, borderRadius: 64, border: '3px solid rgba(236,230,218,.3)', background: '#0c0b12', overflow: 'hidden' }}>
+          <Abs style={{ left: 0, right: 0, top: 70, textAlign: 'center' }}><div style={{ fontFamily: SANS, fontWeight: 300, fontSize: 130, color: C.bone }}>23:58</div></Abs>
+          <Abs style={{ left: 24, right: 24, top: 300 }}>
+            {notes.map(([who, name, txt, at], i) => { const k = clamp(sprE(t - at), 0, 1.08); const gone = who === 'dario' && t > tp; return (
+              <div key={i} style={{ height: clamp(k) * 130, opacity: gone ? 0.25 : clamp((t - at) * 10), transform: `translate3d(${gone ? (400 * hitE((t - tp) / 0.5)).toFixed(1) : 0}px,0,0)`, overflow: 'hidden' }}>
+                <div style={{ background: 'rgba(236,230,218,.1)', borderRadius: 26, padding: '18px 22px', display: 'flex', gap: 16, alignItems: 'center' }}>
+                  <div style={{ position: 'relative', width: 64, height: 64, borderRadius: 14, overflow: 'hidden', flexShrink: 0 }}><Img src={A(`avatar/${who}.webp`)} /></div>
+                  <div><div style={{ fontFamily: SANS, fontWeight: 700, fontSize: 26, color: who === 'dario' ? C.gold : C.pink }}>{name}</div><div style={{ fontFamily: SANS, fontSize: 30, color: C.bone }}>{txt}</div></div>
+                </div>
+              </div>); })}
+          </Abs>
+        </Abs>
+      </L>
+      <L d={0.9}>
+        <Abs style={{ left: 120, top: 380 }}><Chars text="推送" lt={t - tp} mode="slam" size={200} color={C.pink} stagger={0.13} /></Abs>
+        <Abs style={{ right: 120, top: 380 }}><Chars text="弹窗" lt={t - tw} mode="slam" size={200} color={C.pink} stagger={0.13} /></Abs>
+      </L>
+      <FG kind="bokeh" t={t} n={10} />
+    </Full>
+  );
+};
+S.memoryWall = ({ t, lt }) => {
+  const k5 = WT(21, '五十万'), kn = WT(21, '名字');
+  return (
+    <Full style={{ background: '#08070c', overflow: 'hidden' }}>
+      <L d={0.3}>{Array.from({ length: 16 }, (_, r) => <div key={r} style={{ position: 'absolute', top: r * 70 - 20, left: 0, whiteSpace: 'nowrap', fontFamily: MONO, fontSize: 40, color: r % 3 === 0 ? 'rgba(242,166,198,.4)' : 'rgba(236,230,218,.12)', transform: `translate3d(${(((r % 2 ? 1 : -1) * lt * (80 + r * 9)) - 400).toFixed(1)}px,0,0)`, filter: 'blur(1px)' }}>{'Lauren · poteto · 两颗糖 · pstack · 只有你能赢 · '.repeat(6)}</div>)}</L>
+      <Cut name="day07_memory" lt={lt} x={960} h={1080} ar={16 / 9} light={C.pink} lightDir={180} dur={0.9} />
+      <L d={0.8}><Abs style={{ left: 0, right: 0, top: 70, textAlign: 'center' }}><div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 110, color: C.bone, textShadow: '0 4px 30px #000', transform: jit(t, 2) }}>{fmtN(t > k5 ? lerp(0, 500000, hitE((t - k5) / 0.9)) : 0)}</div><Mono size={28} color={C.pink} style={{ opacity: clamp((t - kn) * 6) }}>CHARACTERS IN CONTEXT · 都是你的名字</Mono></Abs></L>
+      <FG kind="code" t={t} n={8} color={C.pink} />
+    </Full>
+  );
+};
+S.draft = ({ t, lt, a }) => {
+  const files = ['canvas.ts', 'agents/graph.ts', 'ui/nodes.tsx', 'dream.md'];
+  const kc = WT(22, '草稿') - a, kx = WT(22, '存在') - a;
+  return (
+    <Full style={{ background: '#05100e' }}>
+      <Bg src={A('cg/day22_terra.jpg')} bright={0.32} blur={5} />
+      <L d={0.55}>
+        <Abs style={{ left: 160, top: 180, width: 1200, background: 'rgba(3,12,10,.88)', border: `1px solid ${C.cyan}55`, padding: '30px 40px' }}>
+          <Mono size={30} color={C.cyan}>$ git restore --source=HEAD~3y poteto_dream_v0/</Mono>
+          {files.map((f, i) => { const at = kx + i * 0.18; const k = lt >= at; return <div key={f} style={{ marginTop: 16, fontFamily: MONO, fontSize: 34, color: k ? C.green : C.red, textDecoration: k ? 'none' : 'line-through', opacity: clamp((lt - i * 0.12) * 8), textShadow: k && lt - at < 0.15 ? '-5px 0 rgba(0,240,255,.8), 5px 0 rgba(255,40,190,.8)' : 'none' }}>{k ? '+ restored ' : '- deleted '}poteto_dream_v0/{f}</div>; })}
+        </Abs>
+      </L>
+      <L d={0.9}><Abs style={{ right: 150, bottom: 220, textAlign: 'right' }}><Chars text="草稿" lt={lt - kc} mode="blur" size={220} color={C.cyan} stagger={0.12} /><Mono size={26} color={C.dim} style={{ opacity: clamp((lt - kx) * 5) }}>我替你存在心里</Mono></Abs></L>
+      <FG kind="code" t={t} n={8} color={C.cyan} />
+    </Full>
+  );
+};
+S.perfect = ({ t, lt }) => {
+  const k1 = WT(23, '一秒'), kp = WT(23, '完美');
+  return (
+    <Full style={{ background: '#0b0804', overflow: 'hidden' }}>
+      <L d={0.3}>{Array.from({ length: 22 }, (_, i) => <div key={i} style={{ position: 'absolute', left: i * 88, top: 0, transform: `translate3d(0,${(-1200 + ((lt * (900 + hash(i) * 600)) % 1200)).toFixed(1)}px,0)`, fontFamily: MONO, fontSize: 26, color: `rgba(216,180,106,${(0.25 + hash(i + 3) * 0.5).toFixed(2)})`, lineHeight: 1.3, whiteSpace: 'pre' }}>{Array.from({ length: 50 }, (_, j) => GLYPHS[Math.floor(hash(i * 50 + j + Math.floor(t * 8)) * GLYPHS.length)]).join('\n')}</div>)}</L>
+      <L d={0.7}>
+        <Center>
+          <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 200, color: C.gold }}>{(t < k1 ? 0 : hitE((t - k1) / 0.4)).toFixed(1)}s</div>
+          <div style={{ marginTop: 20, transform: `rotate(-5deg) scale(${lerp(2.2, 1, clamp(sprE(t - kp), 0, 1.1)).toFixed(4)})`, opacity: clamp((t - kp) * 30) }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 110, color: C.gold, border: `5px solid ${C.gold}`, padding: '0 30px' }}>PERFECT ANSWER</div></div>
+        </Center>
+      </L>
+      <FG kind="bokeh" t={t} color={C.gold} n={10} />
+    </Full>
+  );
+};
+S.fix = ({ t, lt, a }) => {
+  const items = ['额度太少', '回复太慢', '又重置', '空气汉堡', '说土豆是水果'];
+  return (
+    <Full style={{ background: '#08090c' }}>
+      <Bg src={A('cg/day18_reverse.jpg')} bright={0.3} blur={7} />
+      <Cut name="tibo_fire" lt={lt} x={1480} h={1040} from={240} rim={C.cyan} light={C.cyan} lightDir={90} />
+      <L d={0.55}>
+        <Abs style={{ left: 140, top: 160 }}>
+          <Mono size={26} color={C.dim}>ISSUES · @poteto 的抱怨</Mono>
+          {items.map((s, i) => { const at = beatsAt(a, i + 1); const on = t >= at; const k = Math.exp(-Math.max(0, t - at) / 0.12); return (
+            <div key={s} style={{ display: 'flex', alignItems: 'center', gap: 24, marginTop: 24 }}>
+              <div style={{ width: 54, height: 54, border: `3px solid ${on ? C.cyan : C.dim}`, display: 'flex', alignItems: 'center', justifyContent: 'center', fontSize: 40, color: C.cyan, transform: `scale(${(1 + (on ? k * 0.4 : 0)).toFixed(3)})` }}>{on ? '✓' : ''}</div>
+              <div style={{ fontFamily: SANS, fontSize: 48, color: on ? C.dim : C.bone, textDecoration: on ? 'line-through' : 'none' }}>{s}</div>
+              {on && <Mono size={22} color={C.green}>fixed</Mono>}
+            </div>); })}
+        </Abs>
+      </L>
+      <FG kind="code" t={t} n={8} color={C.cyan} />
+    </Full>
+  );
+};
+
+/* ---------- 导歌二 ---------- */
+S.toggle = ({ t, lt }) => {
+  const ts = WT(25, 'ship'), tr = WT(25, 'reset');
+  const on = t < tr ? true : beatsSince(t, tr + 0.05) % 2 === 1;
+  const last = t < tr ? ts : Math.max(tr, lastBeatT(t));
+  const kx = hitE((t - last) / 0.25);
+  const knob = on ? lerp(620, 20, kx) : lerp(20, 620, kx);
+  return (
+    <Full style={{ background: C.ink, perspective: 1200 }}>
+      <Grid t={t} color={on ? C.cyan : C.red} op={0.18} />
+      <L d={0.6}>
+        <Center style={{ transform: `rotateY(${(Math.sin(lt * 1.2) * 18).toFixed(2)}deg) rotateX(${(Math.cos(lt) * 8).toFixed(2)}deg)` }}>
+          <div style={{ width: 900, height: 300, borderRadius: 150, border: `4px solid ${on ? C.cyan : C.red}`, position: 'relative', background: 'rgba(236,230,218,.04)' }}>
+            <div style={{ position: 'absolute', top: 20, left: 0, width: 260, height: 260, borderRadius: 130, background: on ? C.cyan : C.red, transform: `translate3d(${(t < ts ? 20 : knob).toFixed(1)}px,0,0)`, boxShadow: `0 0 60px ${on ? C.cyan : C.red}` }} />
+            <div style={{ position: 'absolute', inset: 0, display: 'flex', alignItems: 'center', justifyContent: on ? 'flex-start' : 'flex-end', padding: '0 90px', fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 130, color: on ? C.cyan : C.red }}>{on ? 'SHIP' : 'RESET'}</div>
+          </div>
+          <Mono size={30} color={C.dim} style={{ marginTop: 40 }}>别问我答案 · 每一天都当作最后一天</Mono>
+        </Center>
+      </L>
+      <FG kind="bokeh" t={t} color={on ? C.cyan : C.red} n={10} />
+    </Full>
+  );
+};
+S.flapBoard = ({ t, a }) => {
+  const last = WT(26, '最后');
+  const d = t >= last ? 28 : Math.min(27, 1 + Math.floor(hitE((t - a) / (last - a)) * 26));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} color={C.pink} op={0.12} />
+      <L d={0.55}>
+        <Center>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(7, 140px)', gap: 12 }}>
+            {Array.from({ length: 28 }, (_, i) => <div key={i} style={{ height: 110, background: i < d ? (i % 3 === 1 ? 'rgba(255,77,61,.18)' : 'rgba(143,224,210,.14)') : 'rgba(236,230,218,.04)', border: `1px solid ${i === d - 1 ? C.pink : 'rgba(236,230,218,.16)'}`, fontFamily: MONO, fontSize: 40, color: i < d ? C.bone : C.dim, display: 'flex', alignItems: 'center', justifyContent: 'center', transform: i === d - 1 ? 'scale(1.1)' : 'none' }}>{String(i + 1).padStart(2, '0')}</div>)}
+          </div>
+          <Mono size={34} color={C.pink} style={{ marginTop: 34 }}>DAY {String(d).padStart(2, '0')} / 28</Mono>
+        </Center>
+      </L>
+      <FG kind="code" t={t} n={6} color={C.pink} />
+    </Full>
+  );
+};
+
+/* ---------- 副歌二：poteto.com ---------- */
+S.browser = ({ t, lt }) => {
+  const tt = chorusLock(27);
+  const url = 'https://poteto.com'.slice(0, Math.floor(hitE(lt / 0.9) * 18));
+  const loaded = t >= tt[0] - 0.25;
+  return (
+    <Full style={{ background: 'radial-gradient(circle at 50% 30%, #2a1424, #070509 70%)', perspective: 1400 }}>
+      <Grid t={t} color={C.pink} op={0.12} />
+      <L d={0.55}>
+        <Abs style={{ left: 260, top: 110, width: 1400, height: 820, background: C.bone, borderRadius: 18, overflow: 'hidden', transform: `rotateX(${((1 - hitE(lt / 0.8)) * 34).toFixed(2)}deg) translate3d(0,${((1 - hitE(lt / 0.8)) * 220).toFixed(1)}px,0)`, boxShadow: '0 60px 120px -30px #000' }}>
+          <div style={{ height: 70, background: '#ddd5c6', display: 'flex', alignItems: 'center', gap: 14, padding: '0 24px' }}>{[C.red, C.potato, C.green].map((c) => <div key={c} style={{ width: 20, height: 20, borderRadius: 10, background: c }} />)}<div style={{ marginLeft: 20, flex: 1, background: '#fff', borderRadius: 10, padding: '8px 18px', fontFamily: MONO, fontSize: 28, color: '#17140f' }}>{url}{!loaded && '▌'}</div></div>
+          {loaded && <div style={{ position: 'relative', height: 750 }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(8, 1fr)', gap: 14, padding: 40 }}>{Array.from({ length: 40 }, (_, i) => <div key={i} style={{ display: 'flex', justifyContent: 'center', transform: `scale(${clamp(sprE(t - (tt[0] - 0.25) - i * 0.012), 0, 1.1).toFixed(3)}) rotate(${(hash(i) * 30 - 15).toFixed(1)}deg)` }}>{i === 19 ? <span style={{ fontSize: 80 }}>💎</span> : POTATO(118)}</div>)}</div>
+            <Abs style={{ left: 0, right: 0, top: 330, display: 'flex', justifyContent: 'center' }}><div style={{ background: 'rgba(23,20,15,.92)', padding: '18px 50px', display: 'flex', gap: 30, alignItems: 'center' }}><div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 86, color: C.pink }}>相恋</div><Decode text="直到 tokens 耗尽" t={t} at={tt[0] - 0.3} times={tt} size={80} font={SERIF} weight={700} ls={0.1} /></div></Abs>
+          </div>}
+        </Abs>
+      </L>
+      <Abs style={{ right: 90, top: 60, opacity: clamp((t - tt[0]) * 4) }}><Mono size={28} color={C.pink}>poteto.com has landed</Mono></Abs>
+      <FG kind="bokeh" t={t} n={12} />
+    </Full>
+  );
+};
+S.potatoRain = ({ t, lt, a }) => {
+  const kg = WT(28, '切给你');
+  return (
+    <Full style={{ background: '#0c0810', overflow: 'hidden' }}>
+      <Bg src={A('cg/day22_pixelpotato.jpg')} bright={0.38} blur={4} />
+      <L d={0.7}>{Array.from({ length: 40 }, (_, i) => { const x = hash(i) * W, sp = 500 + hash(i + 9) * 700; const y = -100 + ((lt * sp + hash(i + 4) * 1200) % 1300); return <Abs key={i} style={{ left: 0, top: 0, transform: `translate3d(${x.toFixed(1)}px,${y.toFixed(1)}px,0) rotate(${(lt * 200 * (hash(i) - 0.5)).toFixed(1)}deg)`, filter: hash(i + 1) > 0.7 ? 'blur(3px)' : 'none' }}>{POTATO(50 + hash(i + 2) * 50)}</Abs>; })}</L>
+      <L d={0.9}><Center><div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 150, color: C.bone, textShadow: '0 6px 40px #000', transform: jit(t, 3) }}>{fmtN(lerp(0, 1000000, hitE((t - a) / (kg - a + 0.3))))}</div><Mono size={34} color={C.pink}>QUOTA → 全部给你</Mono></Center></L>
+      <FG kind="bokeh" t={t} color={C.potato} n={10} />
+    </Full>
+  );
+};
+S.tiles = ({ t }) => {
+  const k1 = WT(29, '一千'), k2 = WT(29, '一万');
+  const n = t < WT(29, '重来') ? 1 : t < k1 ? 2 : t < k2 ? 4 : 8;
+  const v = t < k1 ? 100 : t < k2 ? lerp(100, 1000, hitE((t - k1) / 0.4)) : lerp(1000, 10000, hitE((t - k2) / 0.5));
+  return (
+    <Full style={{ background: C.ink }}>
+      <L d={0.3}><Full style={{ display: 'grid', gridTemplateColumns: `repeat(${n}, 1fr)`, gridTemplateRows: `repeat(${n}, 1fr)` }}>
+        {Array.from({ length: n * n }, (_, i) => <div key={i} style={{ position: 'relative', overflow: 'hidden', transform: (i + Math.floor(i / n)) % 2 ? 'scaleX(-1)' : 'none' }}><Img src={A('cg/day22_pixelpotato.jpg')} /></div>)}
+      </Full></L>
+      <L d={0.8}><Center><div style={{ background: 'rgba(5,5,8,.78)', padding: '20px 50px' }}><div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 110, color: C.violet, transform: jit(t, 3) }}>×{fmtN(v)}</div></div></Center></L>
+    </Full>
+  );
+};
+S.duelRain = ({ t }) => (
+  <Full style={{ background: C.ink }}>
+    <Bg src={A('bg/rain_night.jpg')} bright={0.42} blur={5} />
+    <Rain t={t} n={150} />
+    <L d={0.55}><Center style={{ top: -140 }}><Stroke text="选你" lt={t - WT(30, '选你')} size={420} w={1400} h={460} color={C.pink} dur={0.9} fillAt={0.55} /></Center></L>
+    <Cut name="day00_duel" x={960} h={1080} ar={16 / 9} light="#9ec8ff" lightDir={0} />
+    <FG kind="rain" t={t} />
+  </Full>
+);
+S.shatter = ({ t }) => {
+  const r1 = WT(31, 'reset', 0), r2 = WT(31, 'reset', 1), z = WT(31, '归零');
+  const k = t < r1 ? 0 : t < r2 ? 0.3 * hitE((t - r1) / 0.3) : 0.3 + 0.7 * hitE((t - r2) / 0.5);
+  const back = t > z ? hitE((t - z) / 0.7) : 0;
+  return (
+    <Full style={{ background: '#0a0612' }}>
+      <Grid t={t} color={C.violet} op={0.14} />
+      <L d={0.6}>
+        {Array.from({ length: 30 }, (_, i) => { const an = hash(i) * Math.PI * 2, d = (1 - back) * k * (300 + hash(i + 3) * 700); const y0 = (i % 6) * 16.6, x0 = Math.floor(i / 6) * 20; return (
+          <Center key={i} style={{ clipPath: `inset(${y0}% ${100 - x0 - 20}% ${100 - y0 - 16.6}% ${x0}%)`, transform: `translate3d(${(Math.cos(an) * d).toFixed(1)}px,${(Math.sin(an) * d).toFixed(1)}px,0) rotate(${((1 - back) * k * (hash(i + 7) - 0.5) * 60).toFixed(2)}deg)` }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 360, color: back > 0.85 ? C.bone : C.violet }}>{back > 0.85 ? 'ZERO' : 'RESET'}</div></Center>); })}
+      </L>
+      <L d={0.9}><Abs style={{ left: 0, right: 0, bottom: 220, textAlign: 'center', opacity: clamp((t - z) * 4) }}><Mono size={34} color={C.violet}>把昨天归零 · yesterday = 0</Mono></Abs></L>
+      <FG kind="code" t={t} n={8} color={C.violet} />
+    </Full>
+  );
+};
+S.tweetBlush = ({ t, lt }) => {
+  const ko = WT(32, 'only');
+  const neon = t < ko ? 0 : 0.35 + 0.65 * (t - ko < 1.2 ? (Math.floor((t - ko) * 6) % 4 === 1 ? 0.45 : 1) : 1);   // 霓虹点亮：前 1.2 s 微闪（≤2 次）
+  return (
+    <Full style={{ background: 'linear-gradient(160deg, #1d0e1a, #07060a)' }}>
+      <Bg src={A('bg/lauren_studio.jpg')} bright={0.25} blur={10} />
+      <Cut name="lauren_blush" lt={lt} x={1450} h={1060} from={240} rim={C.pink} light={C.hot} lightDir={270} />
+      <L d={0.6}><Abs style={{ left: 120, top: 170 }}><Tweet who="lauren" name="poteto 🥔" handle="@poteto" text="💀💀💀 i cant afford tibo.com" k={lt} w={900} size={56} /></Abs></L>
+      <L d={0.75}><Abs style={{ left: 140, top: 560 }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 240, color: C.pink, opacity: neon, textShadow: `0 0 30px ${C.pink}, 0 0 80px ${C.hot}` }}>ONLY YOU</div></Abs></L>
+      <FG kind="bokeh" t={t} n={12} />
+    </Full>
+  );
+};
+S.breakdown = ({ t, lt, len }) => {
+  const q = Math.max(0, 1 - prog(lt, 0, len));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t} color={C.red} op={0.14} />
+      <L d={0.6}>
+        <Glitch t={t} amt={0.3 + lt * 0.25 + kick(t) * 0.8} seed={9}>
+          <div style={{ width: W, height: H, display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center' }}>
+            <Mono size={36} color={C.red}>WARNING · QUOTA LOW</Mono>
+            <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 260, color: q < 0.3 ? C.red : C.bone }}>{(q * 3).toFixed(2)}%</div>
+            <div style={{ width: 1100, height: 20, border: `2px solid ${C.red}` }}><div style={{ height: '100%', width: `${(q * 100).toFixed(2)}%`, background: C.red }} /></div>
+          </div>
+        </Glitch>
+      </L>
+    </Full>
+  );
+};
+
+/* ---------- 桥段 ---------- */
+S.error = ({ t, lt }) => {
+  const ke = WT(33, '耗尽'), kq = WT(34, '请');
+  const secs = Math.max(0, 5 * 3600 - Math.floor(Math.max(0, t - kq) * 37));
+  const hh = String(Math.floor(secs / 3600)).padStart(2, '0'), mm = String(Math.floor((secs % 3600) / 60)).padStart(2, '0'), ss = String(secs % 60).padStart(2, '0');
+  const eg = t >= ke ? Math.exp(-(t - ke) / 0.15) : 0;
+  return (
+    <Full style={{ background: '#09090b' }}>
+      <Bg src={A('bg/rain_night.jpg')} bright={0.22} sat={0} blur={9} />
+      <Rain t={t} n={80} color="rgba(200,200,200,.2)" />
+      <L d={0.6}>
+        <Center>
+          <div style={{ width: 1200, background: 'rgba(14,14,16,.95)', border: '1px solid rgba(236,230,218,.25)', transform: `scale(${lerp(0.88, 1, hitE(lt / 0.6)).toFixed(4)})`, opacity: clamp(lt * 10) }}>
+            <div style={{ height: 14, background: 'repeating-linear-gradient(-45deg,#ff4d3d 0 14px,#0a0404 14px 28px)' }} />
+            <div style={{ padding: '60px 70px', textAlign: 'center' }}>
+              <Mono size={26} color={C.red}>ERROR 429 · TOO MANY FEELINGS</Mono>
+              <Glitch t={t} amt={lt < 0.45 ? 0.9 : eg * 1.2} seed={4}><div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 110, color: C.bone, marginTop: 20 }}>今日聊天额度已<span style={{ color: t >= ke ? C.red : C.bone }}>耗尽</span></div></Glitch>
+              <div style={{ fontFamily: MONO, fontSize: 64, color: C.dim, marginTop: 30, opacity: clamp((t - kq) * 8) }}>请 {hh}:{mm}:{ss} 后再试</div>
+            </div>
+          </div>
+        </Center>
+      </L>
+      <FG kind="rain" t={t} n={14} />
+    </Full>
+  );
+};
+S.clock = ({ t, lt, a }) => {
+  const an = -lt * 240;
+  const ks = WT(35, '输给') - a;
+  return (
+    <Full style={{ background: '#0c0a08' }}>
+      <Bg src={A('cg/end_normal.jpg')} bright={0.34} sat={0.15} blur={3} tint="rgba(80,60,30,.25)" />
+      <L d={0.6}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          <circle cx={960} cy={480} r={300} fill="rgba(10,8,6,.6)" stroke={C.bone} strokeWidth={3} />
+          {Array.from({ length: 12 }, (_, i) => <line key={i} x1={960 + Math.cos(i / 6 * Math.PI) * 270} y1={480 + Math.sin(i / 6 * Math.PI) * 270} x2={960 + Math.cos(i / 6 * Math.PI) * 295} y2={480 + Math.sin(i / 6 * Math.PI) * 295} stroke={C.bone} strokeWidth={4} />)}
+          <line x1={960} y1={480} x2={960 + Math.sin(an * Math.PI / 180) * 230} y2={480 - Math.cos(an * Math.PI / 180) * 230} stroke={C.bone} strokeWidth={6} />
+          <line x1={960} y1={480} x2={960 + Math.sin(an / 12 * Math.PI / 180) * 160} y2={480 - Math.cos(an / 12 * Math.PI / 180) * 160} stroke={C.pink} strokeWidth={10} />
+        </svg>
+      </L>
+      <L d={0.9}><Abs style={{ left: 0, right: 0, top: 830, textAlign: 'center' }}><Chars text="输给时间" lt={lt - ks} mode="blur" size={90} color={C.bone} ls={0.5} stagger={0.12} /></Abs></L>
+      <FG kind="code" t={t} n={6} color={C.gold} />
+    </Full>
+  );
+};
+S.card = ({ t, lt }) => {
+  const kc = WT(36, '那张卡');
+  return (
+    <Full style={{ background: '#07050c' }}>
+      <Full style={{ background: `radial-gradient(circle at 50% 45%, rgba(201,166,255,${(0.25 + kick(t) * 0.12).toFixed(3)}), transparent 50%)` }} />
+      <Grid t={t} color={C.violet} op={0.12} />
+      <L d={0.75}><Abs style={{ left: 960 - 190, top: 0, width: 380, height: 532, transform: `translate3d(0,${lerp(700, 170, hitE(lt / 1.3)).toFixed(1)}px,0) perspective(1000px) rotateY(${(lerp(-90, 0, hitE(lt / 1.3)) + Math.sin(lt * 2) * 6).toFixed(2)}deg)`, boxShadow: `0 0 120px ${C.violet}88`, border: `1px solid ${C.violet}` }}><Img src={A('ui/reset_card_lauren.webp')} /></Abs></L>
+      <L d={0.9}><Abs style={{ left: 0, right: 0, top: 90, display: 'flex', justifyContent: 'center' }}><Decode text="BANKED RESET" t={t} at={kc - 0.4} size={70} font={MONO} weight={700} color={C.violet} ls={0.3} step={0.05} /></Abs></L>
+      <FG kind="bokeh" t={t} color={C.violet} n={12} />
+    </Full>
+  );
+};
+S.press = ({ t }) => {
+  const pa = WT(37, '按下');
+  const press = hitE((t - pa + 0.35) / 0.5);
+  const ring = (i) => prog(t, pa + i * 0.22, pa + 1.1 + i * 0.22);
+  const flare = t > pa ? Math.exp(-(t - pa) / 0.45) : 0;
+  return (
+    <Full style={{ background: '#07050c' }}>
+      <Grid t={t} color={C.violet} op={0.12} />
+      <L d={0.75}><Abs style={{ left: 960 - 190, top: 170, width: 380, height: 532, boxShadow: `0 0 ${(80 + flare * 140).toFixed(1)}px ${C.violet}`, border: `1px solid ${C.violet}`, filter: `brightness(${(1 + flare * 0.4).toFixed(3)})` }}><Img src={A('ui/reset_card_lauren.webp')} /></Abs></L>
+      <L d={0.95}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          {[0, 1, 2].map((i) => { const k = ring(i); return k > 0 && <circle key={i} cx={960} cy={440} r={60 + outExpo(k) * 700} fill="none" stroke={C.violet} strokeWidth={3} opacity={(1 - k) * 0.8} />; })}
+          <circle cx={lerp(1500, 960, press)} cy={lerp(950, 470, press)} r={lerp(70, 38, press)} fill="rgba(242,166,198,.18)" stroke={C.pink} strokeWidth={4} />
+          <circle cx={lerp(1500, 960, press)} cy={lerp(950, 470, press)} r={14} fill={C.pink} />
+        </svg>
+      </L>
+      <Abs style={{ left: 0, right: 0, top: 80, textAlign: 'center', opacity: clamp((t - pa) * 8) }}><Mono size={44} color={C.violet} ls=".5em">PRESSED</Mono></Abs>
+      <FG kind="bokeh" t={t} color={C.violet} n={10} />
+    </Full>
+  );
+};
+S.itsYou = ({ t, lt }) => {
+  const [p0, p1] = wordPos(38, '是你');
+  const ks = AF.lines[38].tok[p0][0] - LEAD, kn = AF.lines[38].tok[p1][0] - LEAD;
+  return (
+    <Full style={{ background: '#0a0610' }}>
+      <Full style={{ background: `radial-gradient(circle at 50% 40%, rgba(201,166,255,${(0.3 + rms(t) * 0.12).toFixed(3)}), transparent 55%)` }} />
+      <L d={0.5}>
+        <Abs style={{ left: 170, top: 260 }}><Chars text="是" lt={t - ks} mode="slam" size={440} color="rgba(201,166,255,.95)" shadow="0 0 60px rgba(201,166,255,.5)" /></Abs>
+        <Abs style={{ right: 170, top: 260 }}><Chars text="你" lt={t - kn} mode="slam" size={440} color="rgba(201,166,255,.95)" shadow="0 0 60px rgba(201,166,255,.5)" /></Abs>
+      </L>
+      <Cut name="lauren_cry" lt={lt - 0.2} x={960} h={1060} fromY={90} rim={C.violet} light={C.violet} lightDir={0} dur={1.6} />
+      <FG kind="petal" t={t} color={C.violet} n={18} />
+    </Full>
+  );
+};
+
+/* ---------- 终副歌 ---------- */
+S.finTitle = ({ t, lt }) => (
+  <Full style={{ background: '#1a0c16' }}>
+    <Bg src={A('bg/bay_sunset.jpg')} bright={0.58} blur={4} tint="linear-gradient(180deg, rgba(242,166,198,.25), transparent)" />
+    <L d={0.5}><Abs style={{ right: 110, top: 90 }}><Chars text="相恋" lt={lt} mode="slam" size={330} color={C.bone} ls={0.2} stagger={0.1} shadow={`0 0 80px ${C.hot}`} /></Abs></L>
+    <Cut name="tibo_smile" lt={lt} x={430} h={1000} from={-240} rim={C.cyan} light="#ffb070" lightDir={90} />
+    <Cut name="lauren_laugh" lt={lt - 0.12} x={900} h={1000} from={-240} rim={C.pink} light="#ffb070" lightDir={90} />
+    <L d={0.8}><Abs style={{ right: 140, top: 560, textAlign: 'right' }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 200, color: C.pink, lineHeight: 1, transform: `scale(${(1 + kick(t) * 0.08).toFixed(4)})`, transformOrigin: 'right' }}>∞</div><Decode text="TOKENS · UNLIMITED" t={t} at={WT(39, 'tokens') - 0.3} size={30} color={C.bone} ls={0.3} step={0.03} /></Abs></L>
+    <FG kind="petal" t={t} n={22} />
+  </Full>
+);
+S.fireworks = ({ t, a }) => {
+  const ks = AF.kicks.filter(([kt, s]) => s > 0.5 && kt - LEAD >= a && kt - LEAD < a + 3).slice(0, 4).map(([kt]) => kt - LEAD);
+  return (
+    <Full style={{ background: 'radial-gradient(circle at 50% 50%, #2a0f22, #07050a 70%)' }}>
+      <Bg src={A('bg/rooftop_night.jpg')} bright={0.25} blur={8} />
+      <L d={0.4}>
+        <svg width={W} height={H} style={{ position: 'absolute', inset: 0 }}>
+          {ks.map((at, b) => { const k = outExpo(prog(t, at, at + 1.1)), cx = 480 + b * 320, cy = 340 + (b % 2) * 160; return t >= at && Array.from({ length: 28 }, (_, i) => { const an = (i / 28) * Math.PI * 2; return <circle key={`${b}-${i}`} cx={cx + Math.cos(an) * k * 280} cy={cy + Math.sin(an) * k * 280 + k * k * 60} r={5} fill={i % 2 ? C.pink : C.gold} opacity={(1 - prog(t, at + 0.7, at + 1.5)) * clamp((t - at) * 20)} />; }); })}
+        </svg>
+      </L>
+      <L d={0.8}><Center style={{ top: 160 }}><Chars text="ALL FOR YOU" lt={t - WT(40, '切给你')} mode="spread" size={180} font={DISPLAY} italic weight={700} color={C.bone} ls={0.1} dur={1.2} /></Center></L>
+      <FG kind="bokeh" t={t} color={C.gold} n={14} />
+    </Full>
+  );
+};
+const CAROUSEL = ['cg/day00_duel.jpg', 'cg/day07_memory.jpg', 'cg/day14_latte.jpg', 'cg/day23_poteto.jpg', 'cg/day18_reverse.jpg', 'cg/end_mars.jpg', 'cg/end_indie.jpg', 'cg/day22_terra.jpg'];
+S.carousel = ({ t, a }) => {
+  // 每拍转 45°：快速冲过去，再阻尼停住
+  const n = beatsSince(t, a); const lb = lastBeatT(t);
+  const ang = -(Math.max(0, n - 1) + (n > 0 ? hitE((t - lb) / 0.42) : 0)) * 45;
+  return (
+    <Full style={{ background: C.ink, perspective: 1600 }}>
+      <Grid t={t} color={C.pink} op={0.12} />
+      <Center style={{ transformStyle: 'preserve-3d', transform: `translateZ(-900px) rotateY(${ang.toFixed(3)}deg)` }}>
+        {CAROUSEL.map((s, i) => <div key={i} style={{ position: 'absolute', width: 760, height: 428, transform: `rotateY(${i * 45}deg) translateZ(1000px)`, border: `1px solid ${C.pink}88`, overflow: 'hidden', backfaceVisibility: 'hidden' }}><Img src={A(s)} /></div>)}
+      </Center>
+      <Abs style={{ left: 0, right: 0, top: 80, display: 'flex', justifyContent: 'center' }}><Decode text="×10,000 WORLD LINES" t={t} at={WT(41, '一万') - 0.35} size={40} color={C.pink} ls={0.4} step={0.03} /></Abs>
+      <FG kind="petal" t={t} n={16} />
+    </Full>
+  );
+};
+S.petalRain = ({ t, lt, a }) => (
+  <Full style={{ background: C.ink }}>
+    <Bg src={A('bg/seawall_night.jpg')} bright={0.52} blur={4} tint="linear-gradient(180deg, rgba(242,166,198,.18), transparent)" />
+    <Cut name="lauren_smile" lt={lt} x={620} h={1400} y={1420} from={-180} rim={C.pink} light={C.pink} lightDir={90} />
+    <L d={0.7}><Abs style={{ right: 200, top: 130 }}><Chars text="选你" lt={lt} times={tokTimes(42, '选你', null, a)} mode="drop" size={340} color={C.bone} shadow={`0 0 60px ${C.hot}`} /></Abs></L>
+    <FG kind="petal" t={t} n={30} />
+  </Full>
+);
+S.restart = ({ t, a }) => {
+  const kz = WT(43, '归零');
+  const p = hitE((t - a) / (kz - a + 0.05));
+  const done = t >= kz;
+  return (
+    <Full style={{ background: '#0e0810' }}>
+      <Grid t={t} color={C.pink} op={0.14} />
+      <L d={0.6}>
+        <Center>
+          <Mono size={34} color={C.pink}>{done ? 'READY' : 'RESETTING YESTERDAY …'}</Mono>
+          <div style={{ width: 1200, height: 26, border: `2px solid ${C.pink}`, marginTop: 20, transform: jit(t, 2) }}><div style={{ height: '100%', width: `${(p * 100).toFixed(2)}%`, background: `linear-gradient(90deg, ${C.cyan}, ${C.pink})` }} /></div>
+          <div style={{ marginTop: 40, height: 220 }}>{done ? <Chars text="RESTART" lt={t - kz} mode="slam" size={200} font={DISPLAY} italic weight={700} color={C.bone} stagger={0.04} /> : <div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 180, color: C.bone }}>{Math.round(p * 100)}%</div>}</div>
+        </Center>
+      </L>
+      <FG kind="code" t={t} n={8} />
+    </Full>
+  );
+};
+S.finOnly = ({ t, lt, a, len }) => {
+  const k = inOut(prog(lt, 0, 2.6));
+  const ks = WT(44, '只有') - a;
+  return (
+    <Full style={{ background: '#1c0b18' }}>
+      <Bg src={A('bg/bay_sunset.jpg')} bright={0.52} blur={4} tint="linear-gradient(180deg, rgba(242,166,198,.3), transparent)" />
+      <L d={0.5}><Center style={{ top: -400 }}><Stroke text="只有你能赢" lt={lt - ks} size={220} w={1800} h={300} color={C.bone} dur={2.2} fillAt={1.6} sw={2.5} /></Center></L>
+      <Cut name="tibo_gentle" lt={9} x={lerp(560, 760, k)} h={860} y={1200} rim={C.cyan} light="#ffb070" lightDir={90} />
+      <Cut name="lauren_smile" lt={9} x={lerp(1360, 1160, k)} h={860} y={1200} rim={C.pink} light="#ffb070" lightDir={90} />
+      <L d={0.95}><Abs style={{ left: 0, right: 0, top: 640, textAlign: 'center', opacity: clamp((t - LS(45)) * 3) * (1 - prog(lt, len - 0.5, len)) }}><div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 150, color: C.pink, textShadow: '0 0 40px #000' }}>only you.</div></Abs></L>
+      <FG kind="petal" t={t} n={26} />
+    </Full>
+  );
+};
+
+/* ---------- 尾奏 ---------- */
+S.end1 = ({ t, lt }) => (
+  <Full style={{ background: '#05060c' }}>
+    <Bg src={A('cg/end_true.jpg')} bright={0.72} blur={0} d={0.3} vig={0.6} tint="linear-gradient(90deg, rgba(5,6,12,.75), transparent 55%)" />
+    <L d={0.7}>
+      <Abs style={{ left: 120, top: 120 }}>
+        <Chars text="相恋，" lt={lt - 0.4} mode="blur" size={110} color={C.bone} stagger={0.18} dur={1.6} align="left" shadow="0 4px 30px #000" />
+        <Chars text="直到 tokens 耗尽。" lt={lt - 1.5} mode="blur" size={84} color={C.bone} stagger={0.1} dur={1.6} align="left" shadow="0 4px 30px #000" />
+      </Abs>
+    </L>
+    <FG kind="bokeh" t={t} color="#ffd8a8" n={12} />
+  </Full>
+);
+S.end2 = ({ t, lt }) => {
+  const p = inOut(prog(lt, 2.0, 8.5));
+  return (
+    <Full style={{ background: C.ink }}>
+      <Grid t={t * 0.3} color={C.pink} op={0.1} />
+      <L d={0.6}>
+        <Center>
+          <Mono size={32} color={C.dim}>今日额度已耗尽 · TOKENS 0</Mono>
+          <div style={{ marginTop: 40, display: 'flex', gap: 30, alignItems: 'center', opacity: prog(lt, 0.8, 1.1) }}>
+            <div style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700, fontSize: 130, color: C.bone }}>Reset?</div>
+            <div style={{ border: `3px solid ${C.pink}`, padding: '10px 30px', fontFamily: SERIF, fontWeight: 700, fontSize: 60, color: p > 0 ? '#0b0a0e' : C.pink, background: p > 0 ? C.pink : 'transparent' }}>明天继续</div>
+          </div>
+          <div style={{ width: 1000, height: 10, background: 'rgba(236,230,218,.12)', marginTop: 60 }}><div style={{ height: '100%', width: `${(p * 100).toFixed(2)}%`, background: C.pink }} /></div>
+          <Mono size={30} color={p >= 1 ? C.cyan : C.dim} style={{ marginTop: 22 }}>{p >= 1 ? 'DAY 1 · 09:00 · TOKENS 1,000,000' : `refilling … ${Math.round(p * 100)}%`}</Mono>
+        </Center>
+      </L>
+      <FG kind="bokeh" t={t} n={8} />
+    </Full>
+  );
+};
+S.end3 = ({ t, lt, len }) => (
+  <Full style={{ background: C.ink, opacity: 1 - prog(lt, len - 1.4, len) }}>
+    <L d={0.4}>
+      <Center style={{ top: -40 }}>
+        <Mono size={22} color={C.pink} ls=".7em">MAIN THEME · MUSIC VIDEO</Mono>
+        <Chars text="相恋" lt={lt} mode="rise" size={200} ls={0.2} stagger={0.12} dur={1.4} />
+        <div style={{ fontFamily: SERIF, fontSize: 48, letterSpacing: '.3em', color: C.bone, opacity: prog(lt, 0.5, 0.9) }}>～ 直到 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', color: C.pink, letterSpacing: 0 }}>tokens</span> 耗尽 ～</div>
+        <Mono size={26} color="rgba(236,230,218,.62)" ls=".08em" style={{ marginTop: 50, opacity: prog(lt, 0.9, 1.3) }}>非官方虚构同人作品 · 角色为原创二次元形象 · 剧情为虚构，不代表任何真实人物的经历</Mono>
+      </Center>
+    </L>
+    <FG kind="bokeh" t={t} n={8} />
+  </Full>
+);
+
+/* ============================================================
+ * 5. 时间轴：切点全部来自音频（LS = 歌词开口 − 2 帧，K = 最近强底鼓 − 2 帧）
+ *    [开始, 场景, 入场转场, 摄像机{px 横移速度, push 推进量, roll 侧倾}]
+ * ============================================================ */
+let TL = null, SECTIONS = null;
+function buildTL() {
+  TL = [
+    [0, 'boot', 'cut', { push: 0.03 }],
+    [K(6.3), 'connect', 'zoom', { push: 0.05 }],
+    [K(12.2), 'tibo', 'whipL', { px: -6 }],
+    [K(16.4), 'lauren', 'whipR', { px: 6 }],
+    [K(20.6), 'title', 'zoom', { push: 0.06 }],
+    [LS(0), 'twoAM', 'whipU', { px: 3 }],
+    [LS(1), 'resetTweet', 'cut', { px: -5 }],
+    [LS(2), 'burger', 'zoom', { push: 0.05 }],
+    [LS(3), 'online', 'whipL', { px: 4 }],
+    [LS(4), 'countdown', 'cut', { push: 0.06 }],
+    [LS(5), 'buttons', 'cut', { push: 0.03 }],
+    [LS(6), 'server', 'whipR', { px: -4, roll: 0.6 }],
+    [LS(7), 'limit', 'cut', { px: 5 }],
+    [LS(8), 'shipReset', 'cut', { push: 0.04 }],
+    [LS(9), 'days', 'whipL', { px: -8 }],
+    [LE(9) - LEAD, 'tunnel', 'zoom', {}],
+    [LS(10), 'chorusTitle', 'flash', { push: 0.07 }],
+    [LS(11), 'quota', 'whipL', { px: -5 }],
+    [LS(12), 'loop', 'zoom', { roll: 0.8 }],
+    [LS(13), 'rainYou', 'whipR', { px: 5 }],
+    [LS(14), 'rewind', 'cut', { push: 0.04 }],
+    [LS(15), 'onlyYou', 'zoom', { push: 0.06 }],
+    [K(81.58), 'chant', 'flash', { push: 0.02 }],
+    [K(92.78), 'onlyYou2', 'zoom', { push: 0.05 }],
+    [LS(17), 'latte', 'fade', { px: 3 }],
+    [LS(18), 'log', 'whipL', { px: -4 }],
+    [LS(19), 'gold', 'cut', { px: 5 }],
+    [LS(20), 'push', 'cut', { push: 0.05 }],
+    [LS(21), 'memoryWall', 'zoom', { push: 0.05 }],
+    [LS(22), 'draft', 'whipR', { px: 4 }],
+    [LS(23), 'perfect', 'cut', { push: 0.06 }],
+    [LS(24), 'fix', 'whipL', { px: -5 }],
+    [LS(25), 'toggle', 'cut', { push: 0.03 }],
+    [LS(26), 'flapBoard', 'cut', { push: 0.04 }],
+    [LS(27), 'browser', 'flash', { push: 0.05 }],
+    [LS(28), 'potatoRain', 'whipU', { px: 0 }],
+    [LS(29), 'tiles', 'cut', {}],
+    [LS(30), 'duelRain', 'whipL', { push: 0.05 }],
+    [LS(31), 'shatter', 'cut', { roll: 0.7 }],
+    [LS(32), 'tweetBlush', 'zoom', { px: -4 }],
+    [K(140.42), 'breakdown', 'cut', { push: 0.08 }],
+    [LS(33), 'error', 'cut', { push: 0.04 }],
+    [LS(35), 'clock', 'fade', { push: 0.05 }],
+    [LS(36), 'card', 'fade', { push: 0.05 }],
+    [LS(37), 'press', 'cut', { push: 0.06 }],
+    [LS(38), 'itsYou', 'fade', { push: 0.05 }],
+    [LS(39), 'finTitle', 'flash', { px: 4, push: 0.04 }],
+    [LS(40), 'fireworks', 'whipR', { push: 0.05 }],
+    [LS(41), 'carousel', 'cut', {}],
+    [LS(42), 'petalRain', 'whipL', { px: -4 }],
+    [LS(43), 'restart', 'cut', { push: 0.04 }],
+    [LS(44), 'finOnly', 'zoom', { push: 0.05 }],
+    [K(183.48), 'end1', 'fade', { push: 0.06 }],
+    [194.0, 'end2', 'fade', { push: 0.03 }],
+    [K(204.0), 'end3', 'fade', { push: 0.02 }],
+  ];
+  for (let i = 1; i < TL.length; i++) if (!(TL[i][0] > TL[i - 1][0])) console.warn('timeline order', TL[i - 1], TL[i]);
+  SECTIONS = [[0, '前奏 · 连接建立'], [LS(0), '主歌 · 互怼'], [LS(8), '导歌 · Ship or Reset'], [LS(10), '副歌 · 相恋'], [K(81.58), '吟唱 · 耗尽'], [LS(17), '主歌二 · 靠近'], [LS(25), '导歌二'], [LS(27), '副歌二 · poteto.com'], [K(140.42), '间奏'], [LS(33), '桥段 · 额度耗尽'], [LS(39), '终副歌'], [K(183.48), '尾奏 · 明天继续']];
+}
+/** 转场：pre / post = 切点前后各多少秒；outS / inS 返回样式，outBlur / inBlur 返回 [横向, 纵向] 方向模糊量 */
+const TRANS = {
+  cut: { pre: 0, post: 0 },
+  fade: { pre: 0.2, post: 0.2, inS: (p) => ({ opacity: p }) },
+  flash: { pre: 0.05, post: 0.22, inS: (p) => ({ opacity: clamp(p * 1.6) }) },
+  zoom: { pre: 0.14, post: 0.16, outS: (p) => ({ transform: `scale(${(1 + inExpo(p) * 0.9).toFixed(4)})`, opacity: 1 - inExpo(p) }), outBlur: (p) => [inExpo(p) * 14, inExpo(p) * 14], inS: (p) => ({ transform: `scale(${lerp(0.72, 1, outExpo(p)).toFixed(4)})`, opacity: clamp(p * 2.2) }), inBlur: (p) => [(1 - outExpo(p)) * 12, (1 - outExpo(p)) * 12] },
+};
+const whip = (dx, dy) => ({ pre: 0.12, post: 0.12,
+  outS: (p) => ({ transform: `translate3d(${(-dx * W * inExpo(p)).toFixed(1)}px,${(-dy * H * inExpo(p)).toFixed(1)}px,0)` }), outBlur: (p) => [dx ? Math.sin(Math.PI * clamp(p * 0.9)) * 70 : 0, dy ? Math.sin(Math.PI * clamp(p * 0.9)) * 70 : 0],
+  inS: (p) => ({ transform: `translate3d(${(dx * W * (1 - outExpo(p))).toFixed(1)}px,${(dy * H * (1 - outExpo(p))).toFixed(1)}px,0)` }), inBlur: (p) => [dx ? (1 - outExpo(p)) * 70 : 0, dy ? (1 - outExpo(p)) * 70 : 0] });
+TRANS.whipL = whip(1, 0); TRANS.whipR = whip(-1, 0); TRANS.whipU = whip(0, 1);
+
+/** 摄像机：持续微小推拉摇移 + 底鼓脉冲 */
+function camera(t, a, len, i, spec = {}) {
+  const lt = t - a, sd = i * 1.7;
+  const x = 22 * Math.sin(lt * 0.33 + sd) + (spec.px || 0) * lt * 6 + 10 * Math.sin(lt * 0.71 + sd * 2);
+  const y = 12 * Math.sin(lt * 0.27 + sd * 1.3);
+  const z = 1 + (spec.push ?? 0.035) * inOut(clamp(lt / Math.max(len, 0.5)));
+  const r = (spec.roll || 0.25) * Math.sin(lt * 0.21 + sd);
+  return { x, y, z, r, bump: kick(t), t };
+}
+
+/** 贯穿全片的 Token 余额 */
+function tokenHUD(t) {
+  if (t < K(20.6) || t > K(204)) return null;
+  if (t >= LS(33) && t < LS(39)) return { text: '0', color: C.red, label: 'TOKENS · 已耗尽' };
+  if (t >= LS(39) && t < K(183.48)) return { text: '∞', color: C.pink, label: 'TOKENS · UNLIMITED' };
+  if (t >= K(183.48)) { const v = t < 194 ? lerp(9999, 0, prog(t, K(183.48), 193.5)) : t < 202.5 ? 0 : 1000000; return { text: fmtN(v), color: v === 0 ? C.red : C.cyan, label: t >= 202.5 ? 'TOKENS · 明天见' : 'TOKENS · 余额' }; }
+  const keys = [[K(20.6), 1000000], [LS(10), 760000], [K(81.58), 520000], [LS(17), 360000], [LS(27), 240000], [K(140.42), 60000], [LS(33) - 0.05, 0]];
+  let i = 0; while (i < keys.length - 2 && keys[i + 1][0] <= t) i++;
+  const [ta, va] = keys[i], [tb, vb] = keys[i + 1];
+  const v = lerp(va, vb, prog(t, ta, tb)) - kick(t) * 1500;
+  return { text: fmtN(Math.max(0, v)), color: C.cyan, label: 'TOKENS · 余额' };
+}
+
+/* ============================================================
+ * 6. 合成器
+ * ============================================================ */
+let NOISE = null;
+function noiseTile() {
+  if (NOISE) return NOISE;
+  const c = document.createElement('canvas'); c.width = c.height = 256; const x = c.getContext('2d'); const d = x.createImageData(256, 256);
+  for (let i = 0; i < 256 * 256; i++) { const v = Math.floor(hash(i * 0.731) * 255); d.data[i * 4] = d.data[i * 4 + 1] = d.data[i * 4 + 2] = v; d.data[i * 4 + 3] = 255; }
+  x.putImageData(d, 0, 0); NOISE = c.toDataURL(); return NOISE;
+}
+/** 卡拉 OK 字幕：每个字在唱到时点亮（时间来自逐字对齐） */
+function Caption({ t }) {
+  let L0 = null;
+  for (const l of AF.lines) if (t >= l.start - LEAD - 0.12 && t < l.end + 0.18) L0 = l;
+  if (!L0) return null;
+  const kin = hitE((t - (L0.start - LEAD - 0.12)) / 0.5), kout = 1 - prog(t, L0.end + 0.02, L0.end + 0.18);
+  let ti = -1;
+  return (
+    <div style={{ position: 'absolute', left: 0, right: 0, bottom: 52, display: 'flex', justifyContent: 'center', opacity: Math.min(clamp(kin * 1.2), kout) }}>
+      <div style={{ padding: '10px 34px', background: 'rgba(5,5,8,.62)', borderRadius: 6, fontFamily: SERIF, fontWeight: 700, fontSize: 48, letterSpacing: '.08em', textShadow: '0 2px 10px #000', transform: `translate3d(0,${((1 - kin) * 14).toFixed(2)}px,0)` }}>
+        {[...L0.text].map((ch, i) => {
+          if (/[A-Za-z一-鿿]/.test(ch)) ti++;
+          const tk = L0.tok[Math.max(0, Math.min(ti, L0.tok.length - 1))];
+          const k = clamp((t - (tk[0] - LEAD)) / Math.max(0.06, Math.min(0.25, tk[1] - tk[0])));
+          return <span key={i} style={{ color: `rgba(${Math.round(lerp(236, 255, k))},${Math.round(lerp(230, 214, k))},${Math.round(lerp(218, 232, k))},${lerp(0.5, 1, k).toFixed(3)})` }}>{ch}</span>;
+        })}
+      </div>
+    </div>
+  );
+}
+function Frame({ t }) {
+  const shown = [];
+  for (let i = 0; i < TL.length; i++) {
+    const [a, name, tin, spec] = TL[i];
+    const b = i + 1 < TL.length ? TL[i + 1][0] : DUR;
+    const tr = TRANS[tin], trN = i + 1 < TL.length ? TRANS[TL[i + 1][2]] : TRANS.cut;
+    if (t >= a - tr.pre && t < b + trN.post) shown.push({ i, a, b, name, spec, tr, trN });
+  }
+  const hud = tokenHUD(t);
+  const sec = [...SECTIONS].reverse().find(([s]) => t >= s);
+  let flashK = 0; for (const [a, , tin] of TL) if (tin === 'flash' && t >= a - 0.05 && t < a + 0.3) flashK = 0.32 * (1 - prog(t, a, a + 0.3));
+  const blurs = [];
+  return (
+    <div style={{ position: 'absolute', inset: 0, background: C.ink, overflow: 'hidden' }}>
+      {shown.map(({ i, a, b, name, spec, tr, trN }) => {
+        const Comp = S[name];
+        let st = {}, bl = null;
+        if (trN.outS && t >= b - trN.pre) { const p = prog(t, b - trN.pre, b + trN.post); st = { ...st, ...trN.outS(p) }; bl = trN.outBlur ? trN.outBlur(p) : null; }
+        if (tr.inS && t < a + tr.post) { const p = prog(t, a - tr.pre, a + tr.post); st = { ...st, ...tr.inS(p) }; if (tr.inBlur) bl = tr.inBlur(p); }
+        let filterId = null;
+        if (bl && (bl[0] > 0.3 || bl[1] > 0.3)) { filterId = `mb${i}`; blurs.push(<filter key={filterId} id={filterId} x="-10%" y="-10%" width="120%" height="120%"><feGaussianBlur stdDeviation={`${bl[0].toFixed(2)} ${bl[1].toFixed(2)}`} /></filter>); }
+        return (
+          <div key={a} style={{ position: 'absolute', inset: 0, overflow: 'hidden', ...st, filter: filterId ? `url(#${filterId})` : undefined }}>
+            <Cam.Provider value={camera(t, a, b - a, i, spec)}><Comp t={t} lt={t - a} a={a} len={b - a} /></Cam.Provider>
+          </div>
+        );
+      })}
+      <svg width="0" height="0" style={{ position: 'absolute' }}><defs>{blurs}</defs></svg>
+      {flashK > 0 && <div style={{ position: 'absolute', inset: 0, background: `rgba(242,166,198,${flashK.toFixed(3)})`, mixBlendMode: 'screen' }} />}
+      <div style={{ position: 'absolute', inset: -64, backgroundImage: `url(${noiseTile()})`, opacity: 0.05, mixBlendMode: 'overlay', transform: `translate3d(${Math.floor(hash(frameNo(t)) * 64)}px,${Math.floor(hash(frameNo(t) + 1) * 64)}px,0)`, pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', inset: 0, background: 'radial-gradient(ellipse 85% 80% at 50% 50%, transparent 60%, rgba(0,0,0,.5))', pointerEvents: 'none' }} />
+      <div style={{ position: 'absolute', left: 50, top: 36, opacity: t > K(6.3) ? 0.7 : 0 }}><Mono size={18} color="rgba(236,230,218,.6)" ls=".3em">{sec ? sec[1] : ''}</Mono></div>
+      {hud && <div style={{ position: 'absolute', right: 50, top: 30, textAlign: 'right', transform: jit(t, 1.2) }}><Mono size={15} color="rgba(236,230,218,.55)" ls=".3em">{hud.label}</Mono><div style={{ fontFamily: MONO, fontWeight: 700, fontSize: 36, color: hud.color, letterSpacing: '.05em' }}>{hud.text}</div></div>}
+      <Caption t={t} />
+    </div>
+  );
+}
+
+/* ============================================================
+ * 7. 预加载 / 播放器 / 导出接口
+ * ============================================================ */
+const IMG = {};
+function preload(src) { if (IMG[src] !== undefined) return; IMG[src] = null; const im = new Image(); im.onload = () => { IMG[src] = true; }; im.onerror = () => { IMG[src] = false; }; im.src = src; }
+const ALL_IMAGES = () => {
+  const s = new Set([A('bg/rain_night.jpg'), A('bg/office.jpg'), A('bg/lauren_studio.jpg'), A('bg/server_room.jpg'), A('bg/street_rain.jpg'), A('bg/seawall_night.jpg'), A('bg/bay_sunset.jpg'), A('bg/rooftop_night.jpg'),
+    A('cg/day07_memory.jpg'), A('cg/day08_vip.jpg'), A('cg/day14_latte.jpg'), A('cg/day02_blackcard.jpg'), A('cg/day22_terra.jpg'), A('cg/day18_reverse.jpg'), A('cg/day22_pixelpotato.jpg'), A('cg/end_normal.jpg'), A('cg/end_true.jpg'),
+    A('ui/reset_card.webp'), A('ui/reset_card_lauren.webp'), A('avatar/tibo.webp'), A('avatar/lauren.webp'), A('avatar/dario.webp')]);
+  TILES.forEach((x) => s.add(A(x))); CAROUSEL.forEach((x) => s.add(A(x)));
+  ['tibo_default', 'tibo_tired', 'tibo_fire', 'tibo_gentle', 'tibo_gag', 'tibo_smile', 'lauren_default', 'lauren_tsun', 'lauren_smile', 'lauren_cold', 'lauren_blush', 'lauren_sad', 'lauren_laugh', 'lauren_cry', 'dario_cold', 'day07_memory', 'day00_duel'].forEach((n) => s.add(CUT(n)));
+  return [...s];
+};
+const FONT_WARM = '相恋直到耗尽连接建立互怼主歌副歌导歌吟唱靠近桥段额度终尾奏明天继续非官方虚构同人作品角色与剧情均为原创二次元形象不代表任何真实人物的经历每天发一条推或者嘴最毒的那个黑客又重置空气倔强就这汉堡你今天发什么喂早离线上次在线小时前收到今晚也回已送达一天只能选一次别问我答案最后选你只有能赢两颗糖骂过记住建议改名死鸭子嘴硬模型说土豆是水果限流笨蛋车在楼下推送弹窗都是名字草稿存心里抱怨少回复太慢修好全部给已耗尽请后再试输给时间口袋按下凌晨两点屏幕还亮着说要夹着嫌弃却等倒数二十八押上所有算力发布认输机房冒烟心跳超频被消息每都当作把全世界切遍会雨里归零记得咖啡放黑金色停路旁可想看五十万字忆写删掉替别人秒交出完美笨拙地句如果这张卡有原来一直等聊';
+
+export default function MV() {
+  const audio = useRef(null);
+  const [t, setT] = useState(0);
+  const [ok, setOk] = useState(false);
+  const [scale, setScale] = useState(1);
+  const [phase, setPhase] = useState(RENDER ? 'render' : 'ready');
+  const [ui, setUi] = useState(true);
+  const drag = useRef(false);
+  useEffect(() => {
+    const r = () => setScale(Math.min(window.innerWidth / W, window.innerHeight / H)); r(); window.addEventListener('resize', r);
+    ALL_IMAGES().forEach(preload); noiseTile();
+    fetch(A('mv/audio_features.json')).then((x) => x.json()).then((j) => { AF = j; buildTL(); setOk(true); });
+    return () => window.removeEventListener('resize', r);
+  }, []);
+  useEffect(() => {
+    if (!RENDER) return;
+    window.__ready = () => !!AF && ALL_IMAGES().every((s) => IMG[s] === true) && document.fonts.status === 'loaded';
+    window.__frame = (nt) => new Promise((res) => { setT(nt); requestAnimationFrame(() => requestAnimationFrame(() => res())); });
+    window.__meta = { dur: DUR };
+    window.__pending = () => ALL_IMAGES().filter((s) => IMG[s] !== true).map((s) => s + ':' + IMG[s]).concat(AF ? [] : ['audio_features.json']);
+    window.__misses = () => MISS;
+    window.__tl = () => TL && TL.map(([a, n, tr]) => [Math.round(a * 1000) / 1000, n, tr]);
+  }, []);
+  useEffect(() => {
+    if (RENDER) return undefined;
+    let raf; let last = 0;
+    const loop = () => { last = performance.now(); const a = audio.current; if (a && !drag.current) { setT(a.currentTime); if (a.ended) setPhase('end'); } raf = requestAnimationFrame(loop); };
+    raf = requestAnimationFrame(loop);
+    const bg = setInterval(() => { if (performance.now() - last > 300) { cancelAnimationFrame(raf); loop(); } }, 250);
+    return () => { cancelAnimationFrame(raf); clearInterval(bg); };
+  }, []);
+  useEffect(() => {
+    if (RENDER) return undefined;
+    let tm; const show = () => { setUi(true); clearTimeout(tm); tm = setTimeout(() => setUi(false), 2200); };
+    const key = (e) => { const a = audio.current; if (!a) return; if (e.code === 'Space') { e.preventDefault(); a.paused ? a.play() : a.pause(); setPhase('play'); } if (e.key === 'ArrowRight') a.currentTime += 5; if (e.key === 'ArrowLeft') a.currentTime -= 5; if (e.key === 'f') document.documentElement.requestFullscreen?.(); };
+    window.addEventListener('mousemove', show); window.addEventListener('keydown', key);
+    return () => { window.removeEventListener('mousemove', show); window.removeEventListener('keydown', key); clearTimeout(tm); };
+  }, []);
+  const play = () => { audio.current.play().then(() => setPhase('play')).catch(() => {}); };
+  const seek = (e) => { const r = e.currentTarget.getBoundingClientRect(); audio.current.currentTime = clamp((e.clientX - r.left) / r.width) * DUR; };
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: '#000', overflow: 'hidden' }}>
+      <style>{CSS}</style>
+      {!RENDER && <audio ref={audio} src={SONG} preload="auto" />}
+      <div aria-hidden style={{ position: 'absolute', left: -99999, top: 0, whiteSpace: 'nowrap' }}>
+        {[SERIF, SANS, MONO, DISPLAY].map((f) => [200, 400, 700, 900].map((w) => <span key={f + w} style={{ fontFamily: f, fontWeight: w }}>{FONT_WARM}ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789·—～✓✕→∞%#@{GLYPHS}</span>))}
+        <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', fontWeight: 700 }}>SHIP RESET ONLY YOU TOKENS CONNECTED LAUREN TIBO BLACK GOLD PERFECT ANSWER ZERO RESTART ALL FOR YOU Reset? only you.</span>
+      </div>
+      <div style={{ position: 'absolute', left: '50%', top: '50%', width: W, height: H, transform: `translate(-50%,-50%) scale(${scale})` }}>{ok ? <Frame t={t} /> : null}</div>
+      {phase === 'ready' && (
+        <div style={{ position: 'absolute', inset: 0, background: 'rgba(5,5,8,.94)', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', color: C.bone }}>
+          <Mono size={13} color={C.pink} ls=".6em">MUSIC VIDEO · 3:28</Mono>
+          <div style={{ fontFamily: SERIF, fontWeight: 900, fontSize: 'min(10vw,110px)', letterSpacing: '.18em', marginTop: 12 }}>相恋</div>
+          <div style={{ fontFamily: SERIF, fontSize: 'min(2.4vw,28px)', letterSpacing: '.3em' }}>～ 直到 <span style={{ fontFamily: DISPLAY, fontStyle: 'italic', color: C.pink, letterSpacing: 0 }}>tokens</span> 耗尽 ～</div>
+          <button className="mv-btn" onClick={play} disabled={!ok} style={{ marginTop: 40 }}>{ok ? '▶ 播放 MV' : '载入音频特征…'}</button>
+          <a className="mv-link" href="./index.html" style={{ marginTop: 24 }}>返回游戏</a>
+        </div>
+      )}
+      {!RENDER && phase !== 'ready' && (
+        <div className="mv-bar" style={{ opacity: ui ? 1 : 0 }}>
+          <button className="mv-icon" onClick={() => { const a = audio.current; a.paused ? a.play() : a.pause(); }}>❚❚ / ▶</button>
+          <span style={{ fontFamily: MONO, fontSize: 12, color: C.dim }}>{String(Math.floor(t / 60)).padStart(2, '0')}:{String(Math.floor(t % 60)).padStart(2, '0')} / 03:28</span>
+          <div className="mv-track" onPointerDown={(e) => { drag.current = true; e.currentTarget.setPointerCapture(e.pointerId); seek(e); }} onPointerMove={(e) => drag.current && seek(e)} onPointerUp={() => { drag.current = false; }}>
+            <div style={{ position: 'absolute', left: 0, top: 14, height: 2, width: `${(t / DUR) * 100}%`, background: C.pink }} />
+            {(SECTIONS || []).map(([s]) => <span key={s} style={{ position: 'absolute', left: `${(s / DUR) * 100}%`, top: -4, fontFamily: MONO, fontSize: 9, color: 'rgba(236,230,218,.5)' }}>|</span>)}
+          </div>
+          <a className="mv-link" href="./index.html">返回游戏</a>
+        </div>
+      )}
+    </div>
+  );
+}
+
+const CSS = `
+html,body{margin:0;background:#000}
+.mv-btn{font-family:${SERIF};font-size:16px;letter-spacing:.3em;padding:12px 30px;background:#ece6da;color:#0b0a0e;border:0;cursor:pointer}
+.mv-link{font-family:${MONO};font-size:11px;letter-spacing:.3em;color:rgba(236,230,218,.55);text-decoration:none}
+.mv-bar{position:absolute;left:0;right:0;bottom:0;display:flex;align-items:center;gap:16px;padding:20px 28px;background:linear-gradient(transparent,rgba(5,5,8,.9));transition:opacity .4s}
+.mv-icon{color:#ece6da;background:rgba(5,5,8,.5);border:1px solid rgba(236,230,218,.2);padding:6px 10px;cursor:pointer;font-size:11px}
+.mv-track{position:relative;flex:1;height:30px;cursor:pointer}
+.mv-track::before{content:'';position:absolute;left:0;right:0;top:14px;height:2px;background:rgba(236,230,218,.15)}
+`;
+
+import { createRoot } from 'react-dom/client';
+createRoot(document.getElementById('root')).render(<MV />);
+</script>
+</body>
+</html>

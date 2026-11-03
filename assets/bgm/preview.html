@@ -1,0 +1,100 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>配乐试听校准 · 相恋~直到 tokens 耗尽</title>
+<style>
+  :root { --ink:#0b0a0e; --bone:#ece6da; --dim:rgba(236,230,218,.5); --pink:#f2a6c6; --cyan:#8fe0d2; --gold:#d8b46a; --red:#ff4d3d; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--ink); color:var(--bone); font-family:"Noto Sans SC","Microsoft YaHei",sans-serif; }
+  header { padding:28px 32px 12px; border-bottom:1px solid rgba(236,230,218,.12); }
+  h1 { margin:0; font:600 28px "Noto Serif SC",serif; }
+  .sub { color:var(--dim); font-size:13px; margin-top:6px; line-height:1.7; }
+  main { padding:12px 32px 80px; max-width:1180px; }
+  h2 { font:600 18px "Noto Serif SC",serif; margin:28px 0 6px; }
+  audio { width:100%; height:34px; margin:4px 0 8px; }
+  .row { display:grid; grid-template-columns: 150px 1fr 190px 210px 64px; gap:12px; align-items:center; padding:10px 0; border-top:1px solid rgba(236,230,218,.08); }
+  .name { font-weight:700; }
+  .use { color:var(--dim); font-size:12px; line-height:1.5; }
+  .conf { font:11px Consolas,monospace; padding:1px 6px; border:1px solid; margin-left:6px; }
+  .conf.高 { color:var(--cyan); } .conf.中 { color:var(--gold); } .conf.低 { color:var(--red); }
+  input[type=number] { width:76px; background:#16141c; color:var(--bone); border:1px solid rgba(236,230,218,.2); padding:4px 6px; font:13px Consolas,monospace; }
+  button { background:transparent; color:var(--bone); border:1px solid rgba(236,230,218,.35); padding:5px 10px; cursor:pointer; font-size:12px; }
+  button:hover { background:var(--bone); color:var(--ink); }
+  button.on { background:var(--pink); color:var(--ink); border-color:var(--pink); }
+  .t { font:12px Consolas,monospace; color:var(--dim); }
+  .now { position:fixed; left:0; right:0; bottom:0; background:#16141c; border-top:1px solid rgba(236,230,218,.15); padding:10px 32px; display:flex; gap:16px; align-items:center; font-size:13px; }
+  .now b { color:var(--pink); }
+  textarea { width:100%; height:220px; background:#16141c; color:var(--bone); border:1px solid rgba(236,230,218,.2); font:12px Consolas,monospace; margin-top:8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>配乐试听校准</h1>
+  <div class="sub">
+    每一行是游戏里的一个配乐片段。点「▶ 试听」从起点播放到终点；点「听结尾」只播最后 5 秒，检查循环能否接上。时间不对就直接改数字（单位：秒），可以先用每首歌上方的完整播放条找准时间点。<br>
+    置信度：<span class="conf 高">高</span> 基本确定 · <span class="conf 中">中</span> 大致对 · <span class="conf 低">低</span> 需要你耳朵判断。全部调好后点页面最下方的「导出」，把结果发给 Claude。
+  </div>
+</header>
+<main id="app"></main>
+<div class="now">正在播放：<b id="nowName">—</b> <span class="t" id="nowTime"></span> <button id="stopAll">■ 停止</button></div>
+<script>
+const fmt = (s) => `${Math.floor(s / 60)}:${(s % 60).toFixed(1).padStart(4, '0')}`;
+let data, player = new Audio(), current = null, stopAt = null, loopFrom = null;
+player.addEventListener('timeupdate', () => {
+  document.getElementById('nowTime').textContent = fmt(player.currentTime);
+  if (stopAt !== null && player.currentTime >= stopAt) {
+    if (loopFrom !== null) player.currentTime = loopFrom; else { player.pause(); stopAt = null; }
+  }
+});
+document.getElementById('stopAll').onclick = () => { player.pause(); document.querySelectorAll('button.on').forEach((b) => b.classList.remove('on')); };
+
+function play(cue, from, to, loop, btn) {
+  const src = data.sources[cue.src];
+  if (!player.src.endsWith(encodeURI(src.file).replace(/^\.\//, ''))) player.src = src.file;
+  player.volume = Math.min(1, cue.gain || 1);
+  document.querySelectorAll('button.on').forEach((b) => b.classList.remove('on'));
+  btn.classList.add('on');
+  const go = () => { player.currentTime = from; stopAt = to; loopFrom = loop ? cue.start : null; player.play(); };
+  if (player.readyState >= 1) go(); else player.addEventListener('loadedmetadata', go, { once: true });
+  document.getElementById('nowName').textContent = `${cue.name}（${data.sources[cue.src].title}）`;
+}
+
+fetch('cues.json').then((r) => r.json()).then((d) => {
+  data = d;
+  const app = document.getElementById('app');
+  for (const [key, src] of Object.entries(d.sources)) {
+    const sec = document.createElement('section');
+    sec.innerHTML = `<h2>${src.title} <span class="t">${src.file} · ${fmt(src.duration)} · ${src.lufs} LUFS</span></h2><audio controls preload="none" src="${src.file}"></audio>`;
+    for (const cue of d.cues.filter((c) => c.src === key)) {
+      const row = document.createElement('div');
+      row.className = 'row';
+      row.innerHTML = `
+        <div><span class="name">${cue.name}</span><span class="conf ${cue.confidence}">${cue.confidence}</span><div class="t">${cue.id}${cue.loop ? ' · 循环' : ''}</div></div>
+        <div class="use">${cue.use}</div>
+        <div>起 <input type="number" step="0.5" value="${cue.start}" data-k="start"> 止 <input type="number" step="0.5" value="${cue.end}" data-k="end"></div>
+        <div><button data-a="play">▶ 试听</button> <button data-a="tail">听结尾</button>${cue.loop ? ' <button data-a="seam">听接缝</button>' : ''}</div>
+        <div class="t" data-len>${(cue.end - cue.start).toFixed(1)}s</div>`;
+      row.querySelectorAll('input').forEach((inp) => inp.addEventListener('change', () => {
+        cue[inp.dataset.k] = parseFloat(inp.value);
+        row.querySelector('[data-len]').textContent = `${(cue.end - cue.start).toFixed(1)}s`;
+      }));
+      row.querySelector('[data-a=play]').onclick = (e) => play(cue, cue.start, cue.end, cue.loop, e.target);
+      row.querySelector('[data-a=tail]').onclick = (e) => play(cue, Math.max(cue.start, cue.end - 5), cue.end, false, e.target);
+      const seam = row.querySelector('[data-a=seam]');
+      if (seam) seam.onclick = (e) => play(cue, Math.max(cue.start, cue.end - 4), cue.end, true, e.target);
+      sec.appendChild(row);
+    }
+    app.appendChild(sec);
+  }
+  const ex = document.createElement('section');
+  ex.innerHTML = `<h2>导出</h2><button id="exp">导出调整后的分段表</button> <button id="dl">下载 cues.json</button><textarea id="out" placeholder="点「导出」后，这里会出现调整后的分段表，复制发给 Claude 即可"></textarea>`;
+  app.appendChild(ex);
+  const dump = () => JSON.stringify(d, null, 2);
+  document.getElementById('exp').onclick = () => { document.getElementById('out').value = dump(); };
+  document.getElementById('dl').onclick = () => { const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([dump()], { type: 'application/json' })); a.download = 'cues.json'; a.click(); };
+});
+</script>
+</body>
+</html>
